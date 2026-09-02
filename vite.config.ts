@@ -17,7 +17,7 @@ function githubPagesSpa(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [svelte(), githubPagesSpa()],
-  base: '/',
+  base: '/WestieWorkshop/',
   build: {
     outDir: 'docs',
     emptyOutDir: true,

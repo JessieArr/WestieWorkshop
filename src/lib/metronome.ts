@@ -1,7 +1,11 @@
+import type { BeatKind } from './measures'
+import { MEASURE_PATTERNS, type MeasureStructureId } from './measures'
+
+export type { BeatKind, MeasureStructureId }
+
 const LOOKAHEAD_MS = 25
 const SCHEDULE_AHEAD_S = 0.1
 
-export type BeatKind = 'boom' | 'tick'
 export type BeatHandler = (time: number, kind: BeatKind) => void
 
 const BOOM = {
@@ -18,25 +22,50 @@ const SNARE_BURSTS = [
   { offset: 0.024, gain: 0.24, duration: 0.11 },
 ] as const
 
+export type TempoRamp = {
+  from: number
+  to: number
+  duration: number
+}
+
+type ActiveRamp = TempoRamp & {
+  startTime: number
+}
+
 export class Metronome {
   bpm = 120
   onBeat: BeatHandler | null = null
+  structure: MeasureStructureId = 'quarters'
 
   private ctx: AudioContext | null = null
   private noiseBuffer: AudioBuffer | null = null
   private nextNoteTime = 0
-  private beat = 0
+  private stepIndex = 0
   private timerId: ReturnType<typeof setTimeout> | null = null
+  private ramp: ActiveRamp | null = null
 
   get currentTime(): number {
     return this.ctx?.currentTime ?? 0
+  }
+
+  get currentBpm(): number {
+    return this.bpmAt(this.currentTime)
   }
 
   get isRunning(): boolean {
     return this.timerId !== null
   }
 
-  async start(): Promise<void> {
+  bpmAt(time: number): number {
+    if (!this.ramp || this.ramp.duration <= 0) {
+      return this.bpm
+    }
+
+    const progress = Math.min(1, Math.max(0, (time - this.ramp.startTime) / this.ramp.duration))
+    return this.ramp.from + (this.ramp.to - this.ramp.from) * progress
+  }
+
+  async start(ramp?: TempoRamp): Promise<void> {
     if (this.isRunning) {
       return
     }
@@ -46,8 +75,14 @@ export class Metronome {
       await this.ctx.resume()
     }
 
-    this.beat = 0
+    this.stepIndex = 0
     this.nextNoteTime = this.ctx.currentTime
+    if (ramp && ramp.duration > 0) {
+      this.ramp = { ...ramp, startTime: this.ctx.currentTime }
+      this.bpm = ramp.from
+    } else {
+      this.ramp = null
+    }
     this.scheduler()
   }
 
@@ -56,7 +91,8 @@ export class Metronome {
       clearTimeout(this.timerId)
       this.timerId = null
     }
-    this.beat = 0
+    this.stepIndex = 0
+    this.ramp = null
   }
 
   async destroy(): Promise<void> {
@@ -75,15 +111,20 @@ export class Metronome {
     }
 
     while (this.nextNoteTime < ctx.currentTime + SCHEDULE_AHEAD_S) {
-      const kind: BeatKind = this.beat % 2 === 0 ? 'boom' : 'tick'
-      if (kind === 'boom') {
+      const pattern = MEASURE_PATTERNS[this.structure]
+      const step = pattern[this.stepIndex % pattern.length]
+      if (step.kind === 'boom') {
         this.scheduleBoom(this.nextNoteTime)
-      } else {
+      } else if (step.kind === 'tick') {
         this.scheduleSnare(this.nextNoteTime)
+      } else {
+        this.scheduleAnd(this.nextNoteTime)
       }
-      this.onBeat?.(this.nextNoteTime, kind)
-      this.beat += 1
-      this.nextNoteTime += 60 / this.bpm
+      this.onBeat?.(this.nextNoteTime, step.kind)
+      this.stepIndex = (this.stepIndex + 1) % pattern.length
+      const bpm = Math.max(1, this.bpmAt(this.nextNoteTime))
+      this.bpm = bpm
+      this.nextNoteTime += (60 / bpm) * step.beats
     }
 
     this.timerId = setTimeout(this.scheduler, LOOKAHEAD_MS)
@@ -170,6 +211,50 @@ export class Metronome {
     bodyGain.connect(ctx.destination)
     body.start(time)
     body.stop(time + 0.08)
+  }
+
+  private scheduleAnd(time: number): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const noise = this.getNoiseBuffer(ctx)
+    const source = ctx.createBufferSource()
+    source.buffer = noise
+
+    const highpass = ctx.createBiquadFilter()
+    highpass.type = 'highpass'
+    highpass.frequency.setValueAtTime(6500, time)
+
+    const bandpass = ctx.createBiquadFilter()
+    bandpass.type = 'bandpass'
+    bandpass.frequency.setValueAtTime(8500, time)
+    bandpass.Q.setValueAtTime(0.7, time)
+
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.38, time)
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.035)
+
+    source.connect(highpass)
+    highpass.connect(bandpass)
+    bandpass.connect(gain)
+    gain.connect(ctx.destination)
+
+    source.start(time)
+    source.stop(time + 0.04)
+
+    const ping = ctx.createOscillator()
+    const pingGain = ctx.createGain()
+    ping.type = 'triangle'
+    ping.frequency.setValueAtTime(3800, time)
+    ping.frequency.exponentialRampToValueAtTime(2400, time + 0.02)
+    pingGain.gain.setValueAtTime(0.1, time)
+    pingGain.gain.exponentialRampToValueAtTime(0.001, time + 0.025)
+    ping.connect(pingGain)
+    pingGain.connect(ctx.destination)
+    ping.start(time)
+    ping.stop(time + 0.025)
   }
 
   private getNoiseBuffer(ctx: AudioContext): AudioBuffer {

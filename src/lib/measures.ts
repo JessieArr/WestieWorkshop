@@ -44,3 +44,28 @@ export const MEASURE_PATTERNS: Record<MeasureStructureId, PatternStep[]> = {
     { kind: 'and', beats: 0.5 },
   ],
 }
+
+export function structureHasAnd(id: MeasureStructureId): boolean {
+  return MEASURE_PATTERNS[id].some((step) => step.kind === 'and')
+}
+
+/**
+ * Duration until the next event, in quarter-note beats.
+ * Swing only moves `and` notes; boom/tick stay on their original grid.
+ */
+export function swungStepBeats(pattern: PatternStep[], index: number, swing: number): number {
+  const length = pattern.length
+  const step = pattern[index]
+  const next = pattern[(index + 1) % length]
+  const prev = pattern[(index - 1 + length) % length]
+  const amount = Math.min(0.9, Math.max(0.1, swing))
+
+  if (step.kind !== 'and' && next.kind === 'and') {
+    return amount * (step.beats + next.beats)
+  }
+  if (step.kind === 'and') {
+    return (1 - amount) * (prev.beats + step.beats)
+  }
+  return step.beats
+}
+

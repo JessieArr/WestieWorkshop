@@ -3,12 +3,15 @@
   import { Metronome } from './lib/metronome'
   import {
     MEASURE_STRUCTURES,
+    structureHasAnd,
     type BeatKind,
     type MeasureStructureId,
   } from './lib/measures'
 
   const MIN_BPM = 40
   const MAX_BPM = 240
+  const MIN_SWING = 10
+  const MAX_SWING = 90
   const MIN_RAMP_SECONDS = 1
   const MAX_RAMP_SECONDS = 600
 
@@ -20,6 +23,7 @@
   let rampSeconds = $state(30)
   let rampEnabled = $state(false)
   let measureStructure = $state<MeasureStructureId>('quarters')
+  let swingPercent = $state(50)
   let playing = $state(false)
   let pulsing = $state(false)
   let beatKind = $state<BeatKind>('boom')
@@ -28,6 +32,7 @@
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
 
   const displayedBpm = $derived(playing ? liveBpm : rampEnabled ? startBpm : bpm)
+  const swingEnabled = $derived(structureHasAnd(measureStructure))
 
   metronome.onBeat = (time, kind) => {
     const generation = beatGeneration
@@ -50,6 +55,10 @@
 
   $effect(() => {
     metronome.structure = measureStructure
+  })
+
+  $effect(() => {
+    metronome.swing = Number(swingPercent) / 100
   })
 
   $effect(() => {
@@ -151,6 +160,26 @@
         <option value={option.id}>{option.label}</option>
       {/each}
     </select>
+  </label>
+
+  <label class="slider">
+    <span class="slider-label">Swing · {swingPercent}%</span>
+    <input
+      type="range"
+      min={MIN_SWING}
+      max={MAX_SWING}
+      step="1"
+      bind:value={swingPercent}
+      disabled={!swingEnabled}
+      aria-valuemin={MIN_SWING}
+      aria-valuemax={MAX_SWING}
+      aria-valuenow={swingPercent}
+      aria-label="Swing amount for and notes"
+    />
+    <span class="slider-range">
+      <span>{MIN_SWING}%</span>
+      <span>{MAX_SWING}%</span>
+    </span>
   </label>
 
   <label class="toggle">

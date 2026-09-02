@@ -1,5 +1,5 @@
 import type { BeatKind } from './measures'
-import { MEASURE_PATTERNS, type MeasureStructureId } from './measures'
+import { MEASURE_PATTERNS, swungStepBeats, type MeasureStructureId } from './measures'
 
 export type { BeatKind, MeasureStructureId }
 
@@ -36,6 +36,8 @@ export class Metronome {
   bpm = 120
   onBeat: BeatHandler | null = null
   structure: MeasureStructureId = 'quarters'
+  /** Placement of `and` notes between surrounding beats, 0.1–0.9. */
+  swing = 0.5
 
   private ctx: AudioContext | null = null
   private noiseBuffer: AudioBuffer | null = null
@@ -121,10 +123,11 @@ export class Metronome {
         this.scheduleAnd(this.nextNoteTime)
       }
       this.onBeat?.(this.nextNoteTime, step.kind)
+      const stepIndex = this.stepIndex % pattern.length
       this.stepIndex = (this.stepIndex + 1) % pattern.length
       const bpm = Math.max(1, this.bpmAt(this.nextNoteTime))
       this.bpm = bpm
-      this.nextNoteTime += (60 / bpm) * step.beats
+      this.nextNoteTime += (60 / bpm) * swungStepBeats(pattern, stepIndex, this.swing)
     }
 
     this.timerId = setTimeout(this.scheduler, LOOKAHEAD_MS)

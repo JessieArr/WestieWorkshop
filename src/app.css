@@ -6,6 +6,9 @@
   --accent: #aa3bff;
   --accent-bg: rgba(170, 59, 255, 0.1);
   --accent-border: rgba(170, 59, 255, 0.5);
+  --boom: #aa3bff;
+  --tick: #e07a1a;
+  --and: #8b8494;
 
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
@@ -35,6 +38,9 @@
     --accent: #c084fc;
     --accent-bg: rgba(192, 132, 252, 0.15);
     --accent-border: rgba(192, 132, 252, 0.5);
+    --boom: #c084fc;
+    --tick: #f0a04a;
+    --and: #7b8494;
   }
 }
 

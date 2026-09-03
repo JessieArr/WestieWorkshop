@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import { Metronome } from './lib/metronome'
+  import MeasureWheel from './lib/MeasureWheel.svelte'
   import {
     MEASURE_STRUCTURES,
     structureHasAnd,
@@ -27,14 +28,16 @@
   let playing = $state(false)
   let pulsing = $state(false)
   let beatKind = $state<BeatKind>('boom')
+  let pulseBeat = $state<number | null>(null)
   let liveBpm = $state(120)
+  let measureProgress = $state(0)
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
 
   const displayedBpm = $derived(playing ? liveBpm : rampEnabled ? startBpm : bpm)
   const swingEnabled = $derived(structureHasAnd(measureStructure))
 
-  metronome.onBeat = (time, kind) => {
+  metronome.onBeat = (time, kind, beat) => {
     const generation = beatGeneration
     const delayMs = Math.max(0, (time - metronome.currentTime) * 1000)
     setTimeout(() => {
@@ -42,6 +45,9 @@
         return
       }
       beatKind = kind
+      pulseBeat = beat
+      metronome.hearBeat(beat)
+      measureProgress = beat / 4
       pulsing = true
       if (pulseTimer !== null) {
         clearTimeout(pulseTimer)
@@ -54,11 +60,12 @@
   }
 
   $effect(() => {
-    metronome.structure = measureStructure
+    metronome.setStructure(measureStructure)
+    beatGeneration += 1
   })
 
   $effect(() => {
-    metronome.swing = Number(swingPercent) / 100
+    metronome.setSwing(Number(swingPercent) / 100)
   })
 
   $effect(() => {
@@ -76,6 +83,7 @@
     let frame = 0
     const update = () => {
       liveBpm = Math.round(metronome.currentBpm)
+      measureProgress = metronome.measureProgress
       frame = requestAnimationFrame(update)
     }
     frame = requestAnimationFrame(update)
@@ -122,6 +130,8 @@
     playing = false
     pulsing = false
     beatKind = 'boom'
+    pulseBeat = null
+    measureProgress = 0
     beatGeneration += 1
     if (pulseTimer !== null) {
       clearTimeout(pulseTimer)
@@ -148,9 +158,22 @@
     <p>Choose a measure structure, then press play.</p>
   </header>
 
-  <div class="tempo" class:pulsing class:boom={beatKind === 'boom'} class:tick={beatKind === 'tick'} class:and={beatKind === 'and'} aria-live="polite">
-    <span class="bpm-value">{displayedBpm}</span>
-    <span class="bpm-unit">BPM</span>
+  <div class="stage">
+    <div class="wheel-frame">
+      <MeasureWheel
+        structure={measureStructure}
+        swing={Number(swingPercent) / 100}
+        progress={measureProgress}
+        pulsing={pulsing}
+        pulseKind={beatKind}
+        pulseBeat={pulseBeat}
+        playing={playing}
+      />
+    </div>
+    <div class="tempo" class:pulsing class:boom={beatKind === 'boom'} class:tick={beatKind === 'tick'} class:and={beatKind === 'and'} aria-live="polite">
+      <span class="bpm-value">{displayedBpm}</span>
+      <span class="bpm-unit">BPM</span>
+    </div>
   </div>
 
   <label class="measure">
@@ -305,12 +328,27 @@
     color: var(--text);
   }
 
+  .stage {
+    position: relative;
+    width: min(20rem, 100%);
+    aspect-ratio: 1;
+    display: grid;
+    place-items: center;
+  }
+
+  .wheel-frame {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: visible;
+  }
+
   .tempo {
     display: flex;
     align-items: baseline;
     justify-content: center;
     gap: 10px;
-    min-height: 5.5rem;
+    z-index: 1;
     transition: transform 80ms ease-out;
   }
 

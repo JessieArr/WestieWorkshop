@@ -1,12 +1,12 @@
 import type { BeatKind } from './measures'
-import { MEASURE_PATTERNS, swungStepBeats, type MeasureStructureId } from './measures'
+import { MEASURE_PATTERNS, nextEventAfter, normalizeBeat, swungStepBeats, type MeasureStructureId } from './measures'
 
 export type { BeatKind, MeasureStructureId }
 
 const LOOKAHEAD_MS = 25
 const SCHEDULE_AHEAD_S = 0.1
 
-export type BeatHandler = (time: number, kind: BeatKind) => void
+export type BeatHandler = (time: number, kind: BeatKind, beat: number) => void
 
 const BOOM = {
   type: 'sine' as const,
@@ -43,6 +43,10 @@ export class Metronome {
   private noiseBuffer: AudioBuffer | null = null
   private nextNoteTime = 0
   private stepIndex = 0
+  private beatsInMeasure = 0
+  private heardBeat = 0
+  private heardTime = 0
+  private hasHeard = false
   private timerId: ReturnType<typeof setTimeout> | null = null
   private ramp: ActiveRamp | null = null
 
@@ -56,6 +60,75 @@ export class Metronome {
 
   get isRunning(): boolean {
     return this.timerId !== null
+  }
+
+  get measureProgress(): number {
+    if (!this.isRunning || !this.hasHeard) {
+      return 0
+    }
+
+    const extra =
+      (Math.max(0, this.currentTime - this.heardTime) * Math.max(1, this.bpmAt(this.currentTime))) /
+      60
+    return normalizeBeat(this.heardBeat + extra) / 4
+  }
+
+  setStructure(structure: MeasureStructureId): void {
+    if (this.structure === structure) {
+      return
+    }
+    this.structure = structure
+    this.realignUpcoming()
+  }
+
+  setSwing(swing: number): void {
+    const amount = Math.min(0.9, Math.max(0.1, swing))
+    if (Math.abs(this.swing - amount) < 1e-6) {
+      return
+    }
+    this.swing = amount
+    this.realignUpcoming()
+  }
+
+  /** Align the wheel to a note at the moment it is heard. */
+  hearBeat(beat: number): void {
+    this.heardBeat = normalizeBeat(beat)
+    this.heardTime = this.currentTime
+    this.hasHeard = true
+  }
+
+  private playheadBeat(): number {
+    if (!this.hasHeard) {
+      return -0.001
+    }
+    return (
+      this.heardBeat +
+      (Math.max(0, this.currentTime - this.heardTime) * Math.max(1, this.bpmAt(this.currentTime))) /
+        60
+    )
+  }
+
+  private realignUpcoming(): void {
+    if (!this.isRunning) {
+      this.stepIndex = 0
+      this.beatsInMeasure = 0
+      return
+    }
+
+    const position = this.playheadBeat()
+    const next = nextEventAfter(this.structure, this.swing, position)
+    this.stepIndex = next.index
+    this.beatsInMeasure = next.beat
+
+    const bpm = Math.max(1, this.bpmAt(this.currentTime))
+    let beatsUntil = next.beat - normalizeBeat(Math.max(0, position))
+    if (beatsUntil < 1e-4) {
+      beatsUntil += 4
+    }
+    if (!this.hasHeard) {
+      beatsUntil = 0
+    }
+    this.nextNoteTime = this.currentTime + (60 / bpm) * beatsUntil
   }
 
   bpmAt(time: number): number {
@@ -78,6 +151,10 @@ export class Metronome {
     }
 
     this.stepIndex = 0
+    this.beatsInMeasure = 0
+    this.hasHeard = false
+    this.heardBeat = 0
+    this.heardTime = 0
     this.nextNoteTime = this.ctx.currentTime
     if (ramp && ramp.duration > 0) {
       this.ramp = { ...ramp, startTime: this.ctx.currentTime }
@@ -94,6 +171,10 @@ export class Metronome {
       this.timerId = null
     }
     this.stepIndex = 0
+    this.beatsInMeasure = 0
+    this.hasHeard = false
+    this.heardBeat = 0
+    this.heardTime = 0
     this.ramp = null
   }
 
@@ -122,12 +203,18 @@ export class Metronome {
       } else {
         this.scheduleAnd(this.nextNoteTime)
       }
-      this.onBeat?.(this.nextNoteTime, step.kind)
+      const beat = normalizeBeat(this.beatsInMeasure)
+      this.onBeat?.(this.nextNoteTime, step.kind, beat)
       const stepIndex = this.stepIndex % pattern.length
       this.stepIndex = (this.stepIndex + 1) % pattern.length
       const bpm = Math.max(1, this.bpmAt(this.nextNoteTime))
       this.bpm = bpm
-      this.nextNoteTime += (60 / bpm) * swungStepBeats(pattern, stepIndex, this.swing)
+      const stepBeats = swungStepBeats(pattern, stepIndex, this.swing)
+      this.nextNoteTime += (60 / bpm) * stepBeats
+      this.beatsInMeasure += stepBeats
+      if (this.beatsInMeasure >= 4 - 1e-6) {
+        this.beatsInMeasure -= 4
+      }
     }
 
     this.timerId = setTimeout(this.scheduler, LOOKAHEAD_MS)

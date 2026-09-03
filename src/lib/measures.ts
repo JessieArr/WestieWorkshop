@@ -69,3 +69,37 @@ export function swungStepBeats(pattern: PatternStep[], index: number, swing: num
   return step.beats
 }
 
+export type MeasureEvent = {
+  kind: BeatKind
+  /** Position in the measure, in quarter-note beats from 0 up to 4. */
+  beat: number
+}
+
+export function measureEvents(structure: MeasureStructureId, swing: number): MeasureEvent[] {
+  const pattern = MEASURE_PATTERNS[structure]
+  const events: MeasureEvent[] = []
+  let beat = 0
+  for (let i = 0; i < pattern.length; i++) {
+    events.push({ kind: pattern[i].kind, beat })
+    beat += swungStepBeats(pattern, i, swing)
+  }
+  return events
+}
+
+export function normalizeBeat(beat: number): number {
+  return ((beat % 4) + 4) % 4
+}
+
+export function nextEventAfter(
+  structure: MeasureStructureId,
+  swing: number,
+  position: number,
+): { index: number; beat: number } {
+  const events = measureEvents(structure, swing)
+  const upcoming = events.find((event) => event.beat > position + 1e-4)
+  if (upcoming) {
+    return { index: events.indexOf(upcoming), beat: upcoming.beat }
+  }
+  return { index: 0, beat: 0 }
+}
+

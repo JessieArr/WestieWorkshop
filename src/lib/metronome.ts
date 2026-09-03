@@ -48,6 +48,10 @@ export type StartOptions = {
   skip?: SkipConfig
 }
 
+export type PhraseLength = 0 | 8 | 12
+
+const ARPEGGIO_HZ = [523.25, 659.25, 783.99, 1046.5] as const
+
 type ActiveRamp = TempoRamp & {
   startTime: number
 }
@@ -71,6 +75,10 @@ export class Metronome {
   private ramp: ActiveRamp | null = null
   private skip: SkipConfig | null = null
   private elapsedBeats = 0
+  private phraseLength: PhraseLength = 0
+  private phraseBeats = 0
+  private nextPhraseTime = 0
+  private crashBuffer: AudioBuffer | null = null
 
   get currentTime(): number {
     return this.ctx?.currentTime ?? 0
@@ -95,6 +103,20 @@ export class Metronome {
     return normalizeBeat(this.heardBeat + extra) / 4
   }
 
+  get currentBar(): number {
+    if (this.phraseLength <= 0) {
+      return 1
+    }
+    if (!this.isRunning) {
+      return 1
+    }
+
+    const bpm = Math.max(1, this.bpmAt(this.currentTime))
+    const beatsAhead = Math.max(0, (this.nextPhraseTime - this.currentTime) * bpm / 60)
+    const currentBeat = Math.max(0, this.phraseBeats - beatsAhead)
+    return (Math.floor(currentBeat / 4) % this.phraseLength) + 1
+  }
+
   setStructure(structure: MeasureStructureId): void {
     if (this.structure === structure) {
       return
@@ -110,6 +132,10 @@ export class Metronome {
     }
     this.swing = amount
     this.realignUpcoming()
+  }
+
+  setPhraseLength(length: PhraseLength): void {
+    this.phraseLength = length
   }
 
   /** Align the wheel to a note at the moment it is heard. */
@@ -187,6 +213,8 @@ export class Metronome {
     const startBeat = MEASURE_START_BEAT[this.structure]
     this.beatsInMeasure = startBeat
     this.elapsedBeats = startBeat
+    this.phraseBeats = 0
+    this.nextPhraseTime = this.ctx.currentTime
     const bpm = Math.max(1, this.bpmAt(this.ctx.currentTime))
     this.nextNoteTime = this.ctx.currentTime + (60 / bpm) * startBeat
     this.scheduler()
@@ -200,6 +228,8 @@ export class Metronome {
     this.stepIndex = 0
     this.beatsInMeasure = 0
     this.elapsedBeats = 0
+    this.phraseBeats = 0
+    this.nextPhraseTime = 0
     this.hasHeard = false
     this.heardBeat = 0
     this.heardTime = 0
@@ -214,6 +244,7 @@ export class Metronome {
       this.ctx = null
     }
     this.noiseBuffer = null
+    this.crashBuffer = null
   }
 
   private scheduler = (): void => {
@@ -248,6 +279,13 @@ export class Metronome {
       if (this.beatsInMeasure >= 4 - 1e-6) {
         this.beatsInMeasure -= 4
       }
+    }
+
+    while (this.nextPhraseTime < ctx.currentTime + SCHEDULE_AHEAD_S) {
+      this.schedulePhraseAccent(this.nextPhraseTime, this.phraseBeats)
+      const bpm = Math.max(1, this.bpmAt(this.nextPhraseTime))
+      this.nextPhraseTime += 60 / bpm
+      this.phraseBeats += 1
     }
 
     this.timerId = setTimeout(this.scheduler, LOOKAHEAD_MS)
@@ -391,6 +429,105 @@ export class Metronome {
     pingGain.connect(ctx.destination)
     ping.start(time)
     ping.stop(time + 0.025)
+  }
+
+  private schedulePhraseAccent(time: number, beatIndex: number): void {
+    if (this.phraseLength === 0) {
+      return
+    }
+
+    const beatsPerPhrase = this.phraseLength * 4
+    const pos = ((beatIndex % beatsPerPhrase) + beatsPerPhrase) % beatsPerPhrase
+    const lastMeasureStart = (this.phraseLength - 1) * 4
+
+    if (pos >= lastMeasureStart && pos < lastMeasureStart + 4) {
+      this.scheduleArpeggioTone(time, pos - lastMeasureStart)
+    }
+
+    if (beatIndex > 0 && pos === 0) {
+      this.scheduleCrash(time)
+    }
+  }
+
+  private scheduleArpeggioTone(time: number, index: number): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const frequency = ARPEGGIO_HZ[index] ?? ARPEGGIO_HZ[0]
+    const oscillator = ctx.createOscillator()
+    const gain = ctx.createGain()
+    oscillator.type = 'triangle'
+    oscillator.frequency.setValueAtTime(frequency, time)
+    gain.gain.setValueAtTime(0.28, time)
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.22)
+    oscillator.connect(gain)
+    gain.connect(ctx.destination)
+    oscillator.start(time)
+    oscillator.stop(time + 0.24)
+  }
+
+  private scheduleCrash(time: number): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const bpm = Math.max(1, this.bpmAt(time))
+    const duration = (60 / bpm) * 2
+    const noise = this.getCrashBuffer(ctx)
+    const source = ctx.createBufferSource()
+    source.buffer = noise
+
+    const highpass = ctx.createBiquadFilter()
+    highpass.type = 'highpass'
+    highpass.frequency.setValueAtTime(700, time)
+
+    const bandpass = ctx.createBiquadFilter()
+    bandpass.type = 'bandpass'
+    bandpass.frequency.setValueAtTime(3200, time)
+    bandpass.Q.setValueAtTime(0.45, time)
+
+    const sizzle = ctx.createBiquadFilter()
+    sizzle.type = 'highpass'
+    sizzle.frequency.setValueAtTime(6500, time)
+
+    const bodyGain = ctx.createGain()
+    bodyGain.gain.setValueAtTime(0.62, time)
+    bodyGain.gain.exponentialRampToValueAtTime(0.001, time + duration)
+
+    const sizzleGain = ctx.createGain()
+    sizzleGain.gain.setValueAtTime(0.4, time)
+    sizzleGain.gain.exponentialRampToValueAtTime(0.001, time + duration)
+
+    source.connect(highpass)
+    highpass.connect(bandpass)
+    bandpass.connect(bodyGain)
+    bodyGain.connect(ctx.destination)
+
+    source.connect(sizzle)
+    sizzle.connect(sizzleGain)
+    sizzleGain.connect(ctx.destination)
+
+    source.start(time)
+    source.stop(time + duration)
+  }
+
+  private getCrashBuffer(ctx: AudioContext): AudioBuffer {
+    if (this.crashBuffer) {
+      return this.crashBuffer
+    }
+
+    const length = Math.floor(ctx.sampleRate * 4)
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate)
+    const data = buffer.getChannelData(0)
+    for (let i = 0; i < length; i++) {
+      data[i] = Math.random() * 2 - 1
+    }
+
+    this.crashBuffer = buffer
+    return buffer
   }
 
   private getNoiseBuffer(ctx: AudioContext): AudioBuffer {

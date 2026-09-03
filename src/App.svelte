@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
-  import { Metronome, type SkipUnit } from './lib/metronome'
+  import { Metronome, type PhraseLength, type SkipUnit } from './lib/metronome'
   import MeasureWheel from './lib/MeasureWheel.svelte'
   import {
     MEASURE_STRUCTURES,
@@ -42,9 +42,16 @@
     { id: 'skip-measures', label: 'Skip Measures' },
   ] as const
 
+  const PHRASE_STRUCTURES = [
+    { id: 'none', label: 'None', bars: 0 },
+    { id: '8', label: '8 Bars', bars: 8 },
+    { id: '12', label: '12 Bars', bars: 12 },
+  ] as const
+
   type DrillId = (typeof DRILLS)[number]['id']
   type SwingPresetId = (typeof SWING_PRESETS)[number]['id']
   type BpmPresetId = (typeof BPM_PRESETS)[number]['id']
+  type PhraseId = (typeof PHRASE_STRUCTURES)[number]['id']
 
   const metronome = new Metronome()
 
@@ -57,6 +64,7 @@
   let skipAmount = $state(2)
   let skipUnit = $state<SkipUnit>('measures')
   let measureStructure = $state<MeasureStructureId>('quarters')
+  let phraseId = $state<PhraseId>('none')
   let swingPreset = $state<SwingPresetId>('50')
   let swingPercent = $state(50)
   let bpmPreset = $state<BpmPresetId>('120')
@@ -65,6 +73,7 @@
   let beatKind = $state<BeatKind>('boom')
   let pulseBeat = $state<number | null>(null)
   let liveBpm = $state(120)
+  let liveBar = $state(1)
   let measureProgress = $state(0)
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
@@ -72,6 +81,8 @@
   const tempoChange = $derived(drill === 'tempo-change')
   const displayedBpm = $derived(playing ? liveBpm : tempoChange ? startBpm : bpm)
   const swingEnabled = $derived(structureHasAnd(measureStructure))
+  const phraseActive = $derived(phraseId !== 'none')
+  const displayedBar = $derived(playing ? liveBar : 1)
 
   metronome.onBeat = (time, kind, beat, audible) => {
     const generation = beatGeneration
@@ -113,6 +124,11 @@
   })
 
   $effect(() => {
+    const option = PHRASE_STRUCTURES.find((entry) => entry.id === phraseId)
+    metronome.setPhraseLength((option?.bars ?? 0) as PhraseLength)
+  })
+
+  $effect(() => {
     if (playing && tempoChange) {
       return
     }
@@ -127,6 +143,7 @@
     let frame = 0
     const update = () => {
       liveBpm = Math.round(metronome.currentBpm)
+      liveBar = metronome.currentBar
       measureProgress = metronome.measureProgress
       frame = requestAnimationFrame(update)
     }
@@ -194,6 +211,7 @@
     beatKind = 'boom'
     pulseBeat = null
     measureProgress = 0
+    liveBar = 1
     beatGeneration += 1
     if (pulseTimer !== null) {
       clearTimeout(pulseTimer)
@@ -250,8 +268,13 @@
         />
       </div>
       <div class="tempo" class:pulsing class:boom={beatKind === 'boom'} class:tick={beatKind === 'tick'} class:and={beatKind === 'and'} aria-live="polite">
-        <span class="bpm-value">{displayedBpm}</span>
-        <span class="bpm-unit">BPM</span>
+        <div class="tempo-bpm">
+          <span class="bpm-value">{displayedBpm}</span>
+          <span class="bpm-unit">BPM</span>
+        </div>
+        {#if phraseActive}
+          <span class="bar-readout">Bar: {displayedBar}</span>
+        {/if}
       </div>
     </div>
 
@@ -266,14 +289,25 @@
     </button>
   </div>
 
-  <label class="field">
-    <span class="slider-label">Measure structure</span>
-    <select bind:value={measureStructure} aria-label="Measure structure">
-      {#each MEASURE_STRUCTURES as option (option.id)}
-        <option value={option.id}>{option.label}</option>
-      {/each}
-    </select>
-  </label>
+  <div class="field-row">
+    <label class="field">
+      <span class="slider-label">Measure structure</span>
+      <select bind:value={measureStructure} aria-label="Measure structure">
+        {#each MEASURE_STRUCTURES as option (option.id)}
+          <option value={option.id}>{option.label}</option>
+        {/each}
+      </select>
+    </label>
+
+    <label class="field">
+      <span class="slider-label">Phrase structure</span>
+      <select bind:value={phraseId} aria-label="Phrase structure">
+        {#each PHRASE_STRUCTURES as option (option.id)}
+          <option value={option.id}>{option.label}</option>
+        {/each}
+      </select>
+    </label>
+  </div>
 
   {#if swingEnabled}
     <fieldset class="choices">
@@ -513,11 +547,19 @@
 
   .tempo {
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    z-index: 1;
+    transition: transform 80ms ease-out;
+  }
+
+  .tempo-bpm {
+    display: flex;
     align-items: baseline;
     justify-content: center;
     gap: 10px;
-    z-index: 1;
-    transition: transform 80ms ease-out;
   }
 
   .tempo.pulsing.boom {
@@ -547,6 +589,13 @@
     color: var(--accent);
   }
 
+  .bar-readout {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--text);
+  }
+
   .slider,
   .duration,
   .field,
@@ -554,6 +603,13 @@
     display: flex;
     flex-direction: column;
     gap: 10px;
+    width: 100%;
+  }
+
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
     width: 100%;
   }
 

@@ -1,12 +1,19 @@
 import type { BeatKind } from './measures'
-import { MEASURE_PATTERNS, nextEventAfter, normalizeBeat, swungStepBeats, type MeasureStructureId } from './measures'
+import {
+  MEASURE_PATTERNS,
+  MEASURE_START_BEAT,
+  nextEventAfter,
+  normalizeBeat,
+  swungStepBeats,
+  type MeasureStructureId,
+} from './measures'
 
 export type { BeatKind, MeasureStructureId }
 
 const LOOKAHEAD_MS = 25
 const SCHEDULE_AHEAD_S = 0.1
 
-export type BeatHandler = (time: number, kind: BeatKind, beat: number) => void
+export type BeatHandler = (time: number, kind: BeatKind, beat: number, audible: boolean) => void
 
 const BOOM = {
   type: 'sine' as const,
@@ -26,6 +33,19 @@ export type TempoRamp = {
   from: number
   to: number
   duration: number
+}
+
+export type SkipUnit = 'beats' | 'measures'
+
+export type SkipConfig = {
+  every: number
+  skip: number
+  unit: SkipUnit
+}
+
+export type StartOptions = {
+  ramp?: TempoRamp
+  skip?: SkipConfig
 }
 
 type ActiveRamp = TempoRamp & {
@@ -49,6 +69,8 @@ export class Metronome {
   private hasHeard = false
   private timerId: ReturnType<typeof setTimeout> | null = null
   private ramp: ActiveRamp | null = null
+  private skip: SkipConfig | null = null
+  private elapsedBeats = 0
 
   get currentTime(): number {
     return this.ctx?.currentTime ?? 0
@@ -140,7 +162,7 @@ export class Metronome {
     return this.ramp.from + (this.ramp.to - this.ramp.from) * progress
   }
 
-  async start(ramp?: TempoRamp): Promise<void> {
+  async start(options?: StartOptions): Promise<void> {
     if (this.isRunning) {
       return
     }
@@ -150,18 +172,23 @@ export class Metronome {
       await this.ctx.resume()
     }
 
+    const ramp = options?.ramp
     this.stepIndex = 0
-    this.beatsInMeasure = 0
-    this.hasHeard = false
+    this.hasHeard = true
     this.heardBeat = 0
-    this.heardTime = 0
-    this.nextNoteTime = this.ctx.currentTime
+    this.heardTime = this.ctx.currentTime
     if (ramp && ramp.duration > 0) {
       this.ramp = { ...ramp, startTime: this.ctx.currentTime }
       this.bpm = ramp.from
     } else {
       this.ramp = null
     }
+    this.skip = options?.skip ?? null
+    const startBeat = MEASURE_START_BEAT[this.structure]
+    this.beatsInMeasure = startBeat
+    this.elapsedBeats = startBeat
+    const bpm = Math.max(1, this.bpmAt(this.ctx.currentTime))
+    this.nextNoteTime = this.ctx.currentTime + (60 / bpm) * startBeat
     this.scheduler()
   }
 
@@ -172,10 +199,12 @@ export class Metronome {
     }
     this.stepIndex = 0
     this.beatsInMeasure = 0
+    this.elapsedBeats = 0
     this.hasHeard = false
     this.heardBeat = 0
     this.heardTime = 0
     this.ramp = null
+    this.skip = null
   }
 
   async destroy(): Promise<void> {
@@ -196,15 +225,18 @@ export class Metronome {
     while (this.nextNoteTime < ctx.currentTime + SCHEDULE_AHEAD_S) {
       const pattern = MEASURE_PATTERNS[this.structure]
       const step = pattern[this.stepIndex % pattern.length]
-      if (step.kind === 'boom') {
-        this.scheduleBoom(this.nextNoteTime)
-      } else if (step.kind === 'tick') {
-        this.scheduleSnare(this.nextNoteTime)
-      } else {
-        this.scheduleAnd(this.nextNoteTime)
-      }
       const beat = normalizeBeat(this.beatsInMeasure)
-      this.onBeat?.(this.nextNoteTime, step.kind, beat)
+      const audible = !this.isSilentAt(this.elapsedBeats)
+      if (audible) {
+        if (step.kind === 'boom') {
+          this.scheduleBoom(this.nextNoteTime)
+        } else if (step.kind === 'tick') {
+          this.scheduleSnare(this.nextNoteTime)
+        } else {
+          this.scheduleAnd(this.nextNoteTime)
+        }
+      }
+      this.onBeat?.(this.nextNoteTime, step.kind, beat, audible)
       const stepIndex = this.stepIndex % pattern.length
       this.stepIndex = (this.stepIndex + 1) % pattern.length
       const bpm = Math.max(1, this.bpmAt(this.nextNoteTime))
@@ -212,12 +244,26 @@ export class Metronome {
       const stepBeats = swungStepBeats(pattern, stepIndex, this.swing)
       this.nextNoteTime += (60 / bpm) * stepBeats
       this.beatsInMeasure += stepBeats
+      this.elapsedBeats += stepBeats
       if (this.beatsInMeasure >= 4 - 1e-6) {
         this.beatsInMeasure -= 4
       }
     }
 
     this.timerId = setTimeout(this.scheduler, LOOKAHEAD_MS)
+  }
+
+  private isSilentAt(elapsedBeats: number): boolean {
+    if (!this.skip) {
+      return false
+    }
+
+    const unitBeats = this.skip.unit === 'measures' ? 4 : 1
+    const playFor = Math.max(1, this.skip.every) * unitBeats
+    const skipFor = Math.max(1, this.skip.skip) * unitBeats
+    const cycle = playFor + skipFor
+    const pos = ((elapsedBeats % cycle) + cycle) % cycle
+    return pos >= playFor - 1e-6
   }
 
   private scheduleBoom(time: number): void {

@@ -1,5 +1,10 @@
 export type BeatKind = 'boom' | 'tick' | 'and'
-export type MeasureStructureId = 'quarters' | 'halves' | 'eighth-eighth-quarter' | 'eighths'
+export type MeasureStructureId =
+  | 'quarters'
+  | 'halves'
+  | 'two-four'
+  | 'eighth-eighth-quarter'
+  | 'eighths'
 
 export type PatternStep = {
   kind: BeatKind
@@ -8,11 +13,21 @@ export type PatternStep = {
 }
 
 export const MEASURE_STRUCTURES: { id: MeasureStructureId; label: string }[] = [
-  { id: 'quarters', label: '♩♩♩♩' },
-  { id: 'halves', label: '𝅗𝅥 𝅗𝅥' },
-  { id: 'eighth-eighth-quarter', label: '♪♪♩♪♪♩' },
-  { id: 'eighths', label: '♪♪♪♪♪♪♪♪' },
+  { id: 'quarters', label: '1, 2, 3, 4' },
+  { id: 'halves', label: '1, 3' },
+  { id: 'two-four', label: '2, 4' },
+  { id: 'eighth-eighth-quarter', label: '1&2, 3&4' },
+  { id: 'eighths', label: '&1&2&3&4' },
 ]
+
+/** Beat position (0–4) of the first sounded note in the measure. */
+export const MEASURE_START_BEAT: Record<MeasureStructureId, number> = {
+  quarters: 0,
+  halves: 0,
+  'two-four': 1,
+  'eighth-eighth-quarter': 0,
+  eighths: 0,
+}
 
 export const MEASURE_PATTERNS: Record<MeasureStructureId, PatternStep[]> = {
   quarters: [
@@ -24,6 +39,10 @@ export const MEASURE_PATTERNS: Record<MeasureStructureId, PatternStep[]> = {
   halves: [
     { kind: 'boom', beats: 2 },
     { kind: 'boom', beats: 2 },
+  ],
+  'two-four': [
+    { kind: 'tick', beats: 2 },
+    { kind: 'tick', beats: 2 },
   ],
   'eighth-eighth-quarter': [
     { kind: 'boom', beats: 0.5 },
@@ -78,9 +97,9 @@ export type MeasureEvent = {
 export function measureEvents(structure: MeasureStructureId, swing: number): MeasureEvent[] {
   const pattern = MEASURE_PATTERNS[structure]
   const events: MeasureEvent[] = []
-  let beat = 0
+  let beat = MEASURE_START_BEAT[structure]
   for (let i = 0; i < pattern.length; i++) {
-    events.push({ kind: pattern[i].kind, beat })
+    events.push({ kind: pattern[i].kind, beat: normalizeBeat(beat) })
     beat += swungStepBeats(pattern, i, swing)
   }
   return events
@@ -100,6 +119,6 @@ export function nextEventAfter(
   if (upcoming) {
     return { index: events.indexOf(upcoming), beat: upcoming.beat }
   }
-  return { index: 0, beat: 0 }
+  return { index: 0, beat: events[0]?.beat ?? 0 }
 }
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
-  import { Metronome } from './lib/metronome'
+  import { Metronome, type SkipUnit } from './lib/metronome'
   import MeasureWheel from './lib/MeasureWheel.svelte'
   import {
     MEASURE_STRUCTURES,
@@ -15,6 +15,36 @@
   const MAX_SWING = 90
   const MIN_RAMP_SECONDS = 1
   const MAX_RAMP_SECONDS = 600
+  const MIN_SKIP = 1
+  const MAX_SKIP = 32
+
+  const SWING_PRESETS = [
+    { id: '50', label: '50/50', value: 50 },
+    { id: '54', label: '54/46', value: 54 },
+    { id: '60', label: '60/40', value: 60 },
+    { id: '66', label: '66/34', value: 66 },
+    { id: '75', label: '75/25', value: 75 },
+    { id: 'custom', label: 'Custom' },
+  ] as const
+
+  const BPM_PRESETS = [
+    { id: '80', label: '80', value: 80 },
+    { id: '90', label: '90', value: 90 },
+    { id: '100', label: '100', value: 100 },
+    { id: '110', label: '110', value: 110 },
+    { id: '120', label: '120', value: 120 },
+    { id: 'custom', label: 'Custom' },
+  ] as const
+
+  const DRILLS = [
+    { id: 'metronome', label: 'Metronome' },
+    { id: 'tempo-change', label: 'Tempo Change' },
+    { id: 'skip-measures', label: 'Skip Measures' },
+  ] as const
+
+  type DrillId = (typeof DRILLS)[number]['id']
+  type SwingPresetId = (typeof SWING_PRESETS)[number]['id']
+  type BpmPresetId = (typeof BPM_PRESETS)[number]['id']
 
   const metronome = new Metronome()
 
@@ -22,9 +52,14 @@
   let startBpm = $state(80)
   let endBpm = $state(140)
   let rampSeconds = $state(30)
-  let rampEnabled = $state(false)
+  let drill = $state<DrillId>('metronome')
+  let skipEvery = $state(2)
+  let skipAmount = $state(2)
+  let skipUnit = $state<SkipUnit>('measures')
   let measureStructure = $state<MeasureStructureId>('quarters')
+  let swingPreset = $state<SwingPresetId>('50')
   let swingPercent = $state(50)
+  let bpmPreset = $state<BpmPresetId>('120')
   let playing = $state(false)
   let pulsing = $state(false)
   let beatKind = $state<BeatKind>('boom')
@@ -34,10 +69,11 @@
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
 
-  const displayedBpm = $derived(playing ? liveBpm : rampEnabled ? startBpm : bpm)
+  const tempoChange = $derived(drill === 'tempo-change')
+  const displayedBpm = $derived(playing ? liveBpm : tempoChange ? startBpm : bpm)
   const swingEnabled = $derived(structureHasAnd(measureStructure))
 
-  metronome.onBeat = (time, kind, beat) => {
+  metronome.onBeat = (time, kind, beat, audible) => {
     const generation = beatGeneration
     const delayMs = Math.max(0, (time - metronome.currentTime) * 1000)
     setTimeout(() => {
@@ -48,6 +84,14 @@
       pulseBeat = beat
       metronome.hearBeat(beat)
       measureProgress = beat / 4
+      if (!audible) {
+        pulsing = false
+        if (pulseTimer !== null) {
+          clearTimeout(pulseTimer)
+          pulseTimer = null
+        }
+        return
+      }
       pulsing = true
       if (pulseTimer !== null) {
         clearTimeout(pulseTimer)
@@ -69,7 +113,7 @@
   })
 
   $effect(() => {
-    if (playing && rampEnabled) {
+    if (playing && tempoChange) {
       return
     }
     metronome.bpm = bpm
@@ -90,16 +134,21 @@
     return () => cancelAnimationFrame(frame)
   })
 
-  function setRampEnabled(enabled: boolean): void {
-    rampEnabled = enabled
-    if (enabled) {
+  function setDrill(next: DrillId): void {
+    if (next === drill) {
+      return
+    }
+    if (tempoChange && next !== 'tempo-change') {
+      bpm = startBpm
+      bpmPreset = bpmPresetFor(startBpm)
+    }
+    if (next === 'tempo-change') {
       startBpm = bpm
       if (endBpm === startBpm) {
         endBpm = Math.min(MAX_BPM, startBpm + 20)
       }
-    } else {
-      bpm = startBpm
     }
+    drill = next
   }
 
   async function togglePlayback(): Promise<void> {
@@ -108,14 +157,27 @@
       return
     }
 
-    if (rampEnabled) {
+    if (tempoChange) {
       const duration = clamp(Number(rampSeconds) || MIN_RAMP_SECONDS, MIN_RAMP_SECONDS, MAX_RAMP_SECONDS)
       rampSeconds = duration
       liveBpm = startBpm
       await metronome.start({
-        from: clamp(Number(startBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
-        to: clamp(Number(endBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
-        duration,
+        ramp: {
+          from: clamp(Number(startBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
+          to: clamp(Number(endBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
+          duration,
+        },
+      })
+    } else if (drill === 'skip-measures') {
+      skipEvery = clamp(Number(skipEvery) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+      skipAmount = clamp(Number(skipAmount) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+      liveBpm = bpm
+      await metronome.start({
+        skip: {
+          every: skipEvery,
+          skip: skipAmount,
+          unit: skipUnit,
+        },
       })
     } else {
       liveBpm = bpm
@@ -139,6 +201,27 @@
     }
   }
 
+  function setSwingPreset(id: SwingPresetId): void {
+    swingPreset = id
+    const preset = SWING_PRESETS.find((option) => option.id === id)
+    if (preset && 'value' in preset) {
+      swingPercent = preset.value
+    }
+  }
+
+  function setBpmPreset(id: BpmPresetId): void {
+    bpmPreset = id
+    const preset = BPM_PRESETS.find((option) => option.id === id)
+    if (preset && 'value' in preset) {
+      bpm = preset.value
+    }
+  }
+
+  function bpmPresetFor(value: number): BpmPresetId {
+    const preset = BPM_PRESETS.find((option) => 'value' in option && option.value === value)
+    return preset?.id ?? 'custom'
+  }
+
   function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value))
   }
@@ -153,30 +236,37 @@
 </script>
 
 <main class="player">
-  <header>
-    <h1>Metronome</h1>
-    <p>Choose a measure structure, then press play.</p>
-  </header>
+  <div class="hero">
+    <div class="stage">
+      <div class="wheel-frame">
+        <MeasureWheel
+          structure={measureStructure}
+          swing={Number(swingPercent) / 100}
+          progress={measureProgress}
+          pulsing={pulsing}
+          pulseKind={beatKind}
+          pulseBeat={pulseBeat}
+          playing={playing}
+        />
+      </div>
+      <div class="tempo" class:pulsing class:boom={beatKind === 'boom'} class:tick={beatKind === 'tick'} class:and={beatKind === 'and'} aria-live="polite">
+        <span class="bpm-value">{displayedBpm}</span>
+        <span class="bpm-unit">BPM</span>
+      </div>
+    </div>
 
-  <div class="stage">
-    <div class="wheel-frame">
-      <MeasureWheel
-        structure={measureStructure}
-        swing={Number(swingPercent) / 100}
-        progress={measureProgress}
-        pulsing={pulsing}
-        pulseKind={beatKind}
-        pulseBeat={pulseBeat}
-        playing={playing}
-      />
-    </div>
-    <div class="tempo" class:pulsing class:boom={beatKind === 'boom'} class:tick={beatKind === 'tick'} class:and={beatKind === 'and'} aria-live="polite">
-      <span class="bpm-value">{displayedBpm}</span>
-      <span class="bpm-unit">BPM</span>
-    </div>
+    <button
+      type="button"
+      class="play"
+      class:playing
+      aria-pressed={playing}
+      onclick={togglePlayback}
+    >
+      {playing ? 'Stop' : 'Play'}
+    </button>
   </div>
 
-  <label class="measure">
+  <label class="field">
     <span class="slider-label">Measure structure</span>
     <select bind:value={measureStructure} aria-label="Measure structure">
       {#each MEASURE_STRUCTURES as option (option.id)}
@@ -185,37 +275,62 @@
     </select>
   </label>
 
-  <label class="slider">
-    <span class="slider-label">Swing · {swingPercent}%</span>
-    <input
-      type="range"
-      min={MIN_SWING}
-      max={MAX_SWING}
-      step="1"
-      bind:value={swingPercent}
-      disabled={!swingEnabled}
-      aria-valuemin={MIN_SWING}
-      aria-valuemax={MAX_SWING}
-      aria-valuenow={swingPercent}
-      aria-label="Swing amount for and notes"
-    />
-    <span class="slider-range">
-      <span>{MIN_SWING}%</span>
-      <span>{MAX_SWING}%</span>
-    </span>
-  </label>
+  {#if swingEnabled}
+    <fieldset class="choices">
+      <legend class="slider-label">Swing</legend>
+      <div class="choice-list segmented" role="radiogroup" aria-label="Swing amount">
+        {#each SWING_PRESETS as option (option.id)}
+          <label class="choice">
+            <input
+              type="radio"
+              name="swing-preset"
+              value={option.id}
+              checked={swingPreset === option.id}
+              onchange={() => setSwingPreset(option.id)}
+            />
+            {option.label}
+          </label>
+        {/each}
+      </div>
+    </fieldset>
 
-  <label class="toggle">
-    <input
-      type="checkbox"
-      checked={rampEnabled}
+    {#if swingPreset === 'custom'}
+      <label class="slider">
+        <span class="slider-label">Custom · {swingPercent}%</span>
+        <input
+          type="range"
+          min={MIN_SWING}
+          max={MAX_SWING}
+          step="0.5"
+          bind:value={swingPercent}
+          aria-valuemin={MIN_SWING}
+          aria-valuemax={MAX_SWING}
+          aria-valuenow={swingPercent}
+          aria-label="Custom swing amount for and notes"
+        />
+        <span class="slider-range">
+          <span>{MIN_SWING}%</span>
+          <span>{MAX_SWING}%</span>
+        </span>
+      </label>
+    {/if}
+  {/if}
+
+  <label class="field">
+    <span class="slider-label">Drill</span>
+    <select
+      value={drill}
       disabled={playing}
-      onchange={(event) => setRampEnabled(event.currentTarget.checked)}
-    />
-    Transition between two tempos
+      aria-label="Drill"
+      onchange={(event) => setDrill(event.currentTarget.value as DrillId)}
+    >
+      {#each DRILLS as option (option.id)}
+        <option value={option.id}>{option.label}</option>
+      {/each}
+    </select>
   </label>
 
-  {#if rampEnabled}
+  {#if tempoChange}
     <label class="slider">
       <span class="slider-label">Start · {startBpm} BPM</span>
       <input
@@ -279,35 +394,84 @@
       </span>
     </label>
   {:else}
-    <label class="slider">
-      <span class="slider-label">Tempo</span>
-      <input
-        type="range"
-        min={MIN_BPM}
-        max={MAX_BPM}
-        step="1"
-        bind:value={bpm}
-        aria-valuemin={MIN_BPM}
-        aria-valuemax={MAX_BPM}
-        aria-valuenow={bpm}
-        aria-label="Metronome tempo in beats per minute"
-      />
-      <span class="slider-range">
-        <span>{MIN_BPM}</span>
-        <span>{MAX_BPM}</span>
-      </span>
-    </label>
+    <fieldset class="choices">
+      <legend class="slider-label">Tempo</legend>
+      <div class="choice-list" role="radiogroup" aria-label="Tempo in beats per minute">
+        {#each BPM_PRESETS as option (option.id)}
+          <label class="choice">
+            <input
+              type="radio"
+              name="bpm-preset"
+              value={option.id}
+              checked={bpmPreset === option.id}
+              onchange={() => setBpmPreset(option.id)}
+            />
+            {option.label}
+          </label>
+        {/each}
+      </div>
+    </fieldset>
+
+    {#if bpmPreset === 'custom'}
+      <label class="slider">
+        <span class="slider-label">Custom · {bpm} BPM</span>
+        <input
+          type="range"
+          min={MIN_BPM}
+          max={MAX_BPM}
+          step="1"
+          bind:value={bpm}
+          aria-valuemin={MIN_BPM}
+          aria-valuemax={MAX_BPM}
+          aria-valuenow={bpm}
+          aria-label="Custom metronome tempo in beats per minute"
+        />
+        <span class="slider-range">
+          <span>{MIN_BPM}</span>
+          <span>{MAX_BPM}</span>
+        </span>
+      </label>
+    {/if}
   {/if}
 
-  <button
-    type="button"
-    class="play"
-    class:playing
-    aria-pressed={playing}
-    onclick={togglePlayback}
-  >
-    {playing ? 'Stop' : 'Play'}
-  </button>
+  {#if drill === 'skip-measures'}
+    <div class="skip-row">
+      <span>Every</span>
+      <input
+        type="number"
+        min={MIN_SKIP}
+        max={MAX_SKIP}
+        step="1"
+        bind:value={skipEvery}
+        disabled={playing}
+        onblur={() => {
+          skipEvery = clamp(Number(skipEvery) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        }}
+        aria-label="Play this many beats or measures before skipping"
+      />
+      <select
+        bind:value={skipUnit}
+        disabled={playing}
+        aria-label="Skip unit"
+      >
+        <option value="measures">Measures</option>
+        <option value="beats">Beats</option>
+      </select>
+      <span>skip</span>
+      <input
+        type="number"
+        min={MIN_SKIP}
+        max={MAX_SKIP}
+        step="1"
+        bind:value={skipAmount}
+        disabled={playing}
+        onblur={() => {
+          skipAmount = clamp(Number(skipAmount) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        }}
+        aria-label="Number of beats or measures to skip"
+      />
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -315,17 +479,21 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: 28px;
+    justify-content: flex-start;
+    gap: 24px;
     flex-grow: 1;
     width: min(32rem, calc(100% - 48px));
     margin: 0 auto;
-    padding: 48px 0;
+    padding: 16px 0 48px;
     text-align: center;
   }
 
-  header p {
-    color: var(--text);
+  .hero {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
   }
 
   .stage {
@@ -381,11 +549,19 @@
 
   .slider,
   .duration,
-  .measure {
+  .field,
+  .choices {
     display: flex;
     flex-direction: column;
     gap: 10px;
     width: 100%;
+  }
+
+  .choices {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    min-inline-size: 0;
   }
 
   .slider-label {
@@ -396,6 +572,103 @@
     color: var(--text);
   }
 
+  .choices legend.slider-label {
+    float: left;
+    width: 100%;
+    padding: 0;
+    margin-bottom: 10px;
+  }
+
+  .choices::after {
+    content: '';
+    display: table;
+    clear: both;
+  }
+
+  .choice-list {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .choice-list.segmented {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0;
+    justify-content: stretch;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  .choice {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-h);
+    cursor: pointer;
+  }
+
+  .segmented .choice {
+    position: relative;
+    justify-content: center;
+    gap: 0;
+    padding: 10px 4px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: 1px 0 0 var(--border);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+
+  .choice:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+  }
+
+  .segmented .choice:has(input:checked) {
+    border-color: transparent;
+    background: var(--accent-bg);
+    font-weight: 700;
+  }
+
+  .choice:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .segmented .choice:has(input:focus-visible) {
+    outline-offset: -2px;
+    z-index: 1;
+  }
+
+  .choice input {
+    accent-color: var(--accent);
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .segmented .choice input {
+    appearance: none;
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .choice:has(input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.65;
+  }
+
   .slider input {
     width: 100%;
     accent-color: var(--accent);
@@ -404,7 +677,10 @@
 
   .slider input:disabled,
   .duration input:disabled,
-  .toggle input:disabled {
+  .field select:disabled,
+  .skip-row input:disabled,
+  .skip-row select:disabled,
+  .choice input:disabled {
     cursor: not-allowed;
     opacity: 0.65;
   }
@@ -425,7 +701,8 @@
     color: var(--text);
   }
 
-  .duration input {
+  .duration input,
+  .skip-row input {
     width: 6.5rem;
     padding: 8px 10px;
     border: 1px solid var(--border);
@@ -437,38 +714,45 @@
     text-align: center;
   }
 
-  .measure select {
+  .skip-row input {
+    width: 4.5rem;
+  }
+
+  .field select,
+  .skip-row select {
     width: 100%;
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: 8px;
     background: var(--bg);
     color: var(--text-h);
-    font-family: 'Noto Music', var(--sans);
-    font-size: 22px;
-    letter-spacing: 0.18em;
+    font: inherit;
+    font-size: 18px;
     text-align: center;
     cursor: pointer;
   }
 
-  .measure select:focus-visible {
+  .skip-row select {
+    width: auto;
+    min-width: 9rem;
+  }
+
+  .field select:focus-visible,
+  .skip-row select:focus-visible,
+  .skip-row input:focus-visible,
+  .duration input:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 
-  .toggle {
+  .skip-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 10px;
+    justify-content: center;
+    gap: 8px 10px;
+    width: 100%;
     color: var(--text-h);
-    cursor: pointer;
-  }
-
-  .toggle input {
-    width: 1.1rem;
-    height: 1.1rem;
-    accent-color: var(--accent);
-    cursor: pointer;
   }
 
   .play {

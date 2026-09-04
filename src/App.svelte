@@ -19,11 +19,12 @@
   const MAX_SKIP = 32
 
   const SWING_PRESETS = [
-    { id: '50', label: '50/50', value: 50 },
-    { id: '54', label: '54/46', value: 54 },
-    { id: '60', label: '60/40', value: 60 },
-    { id: '66', label: '66/34', value: 66 },
-    { id: '75', label: '75/25', value: 75 },
+    { id: '50', label: '1/2', value: 50 },
+    { id: '54', label: '54%', value: 54 },
+    { id: '60', label: '3/5', value: 60 },
+    { id: '62.5', label: '5/8', value: 62.5 },
+    { id: '66.67', label: '2/3', value: 200 / 3 },
+    { id: '75', label: '3/4', value: 75 },
     { id: 'custom', label: 'Custom' },
   ] as const
 
@@ -68,6 +69,8 @@
   let swingPreset = $state<SwingPresetId>('50')
   let swingPercent = $state(50)
   let bpmPreset = $state<BpmPresetId>('120')
+  let startBpmPreset = $state<BpmPresetId>('80')
+  let endBpmPreset = $state<BpmPresetId>('custom')
   let playing = $state(false)
   let pulsing = $state(false)
   let beatKind = $state<BeatKind>('boom')
@@ -161,9 +164,11 @@
     }
     if (next === 'tempo-change') {
       startBpm = bpm
+      startBpmPreset = bpmPresetFor(startBpm)
       if (endBpm === startBpm) {
         endBpm = Math.min(MAX_BPM, startBpm + 20)
       }
+      endBpmPreset = bpmPresetFor(endBpm)
     }
     drill = next
   }
@@ -232,6 +237,22 @@
     const preset = BPM_PRESETS.find((option) => option.id === id)
     if (preset && 'value' in preset) {
       bpm = preset.value
+    }
+  }
+
+  function setStartBpmPreset(id: BpmPresetId): void {
+    startBpmPreset = id
+    const preset = BPM_PRESETS.find((option) => option.id === id)
+    if (preset && 'value' in preset) {
+      startBpm = preset.value
+    }
+  }
+
+  function setEndBpmPreset(id: BpmPresetId): void {
+    endBpmPreset = id
+    const preset = BPM_PRESETS.find((option) => option.id === id)
+    if (preset && 'value' in preset) {
+      endBpm = preset.value
     }
   }
 
@@ -312,7 +333,7 @@
   {#if swingEnabled}
     <fieldset class="choices">
       <legend class="slider-label">Swing</legend>
-      <div class="choice-list segmented" role="radiogroup" aria-label="Swing amount">
+      <div class="choice-list segmented swing-presets" role="radiogroup" aria-label="Swing amount">
         {#each SWING_PRESETS as option (option.id)}
           <label class="choice">
             <input
@@ -365,45 +386,87 @@
   </label>
 
   {#if tempoChange}
-    <label class="slider">
-      <span class="slider-label">Start · {startBpm} BPM</span>
-      <input
-        type="range"
-        min={MIN_BPM}
-        max={MAX_BPM}
-        step="1"
-        bind:value={startBpm}
-        disabled={playing}
-        aria-valuemin={MIN_BPM}
-        aria-valuemax={MAX_BPM}
-        aria-valuenow={startBpm}
-        aria-label="Starting tempo in beats per minute"
-      />
-      <span class="slider-range">
-        <span>{MIN_BPM}</span>
-        <span>{MAX_BPM}</span>
-      </span>
-    </label>
+    <fieldset class="choices">
+      <legend class="slider-label">Start · {startBpm} BPM</legend>
+      <div class="choice-list segmented" role="radiogroup" aria-label="Starting tempo in beats per minute">
+        {#each BPM_PRESETS as option (option.id)}
+          <label class="choice">
+            <input
+              type="radio"
+              name="start-bpm-preset"
+              value={option.id}
+              checked={startBpmPreset === option.id}
+              disabled={playing}
+              onchange={() => setStartBpmPreset(option.id)}
+            />
+            {option.label}
+          </label>
+        {/each}
+      </div>
+    </fieldset>
 
-    <label class="slider">
-      <span class="slider-label">End · {endBpm} BPM</span>
-      <input
-        type="range"
-        min={MIN_BPM}
-        max={MAX_BPM}
-        step="1"
-        bind:value={endBpm}
-        disabled={playing}
-        aria-valuemin={MIN_BPM}
-        aria-valuemax={MAX_BPM}
-        aria-valuenow={endBpm}
-        aria-label="Ending tempo in beats per minute"
-      />
-      <span class="slider-range">
-        <span>{MIN_BPM}</span>
-        <span>{MAX_BPM}</span>
-      </span>
-    </label>
+    {#if startBpmPreset === 'custom'}
+      <label class="slider">
+        <span class="slider-label">Custom start · {startBpm} BPM</span>
+        <input
+          type="range"
+          min={MIN_BPM}
+          max={MAX_BPM}
+          step="1"
+          bind:value={startBpm}
+          disabled={playing}
+          aria-valuemin={MIN_BPM}
+          aria-valuemax={MAX_BPM}
+          aria-valuenow={startBpm}
+          aria-label="Custom starting tempo in beats per minute"
+        />
+        <span class="slider-range">
+          <span>{MIN_BPM}</span>
+          <span>{MAX_BPM}</span>
+        </span>
+      </label>
+    {/if}
+
+    <fieldset class="choices">
+      <legend class="slider-label">End · {endBpm} BPM</legend>
+      <div class="choice-list segmented" role="radiogroup" aria-label="Ending tempo in beats per minute">
+        {#each BPM_PRESETS as option (option.id)}
+          <label class="choice">
+            <input
+              type="radio"
+              name="end-bpm-preset"
+              value={option.id}
+              checked={endBpmPreset === option.id}
+              disabled={playing}
+              onchange={() => setEndBpmPreset(option.id)}
+            />
+            {option.label}
+          </label>
+        {/each}
+      </div>
+    </fieldset>
+
+    {#if endBpmPreset === 'custom'}
+      <label class="slider">
+        <span class="slider-label">Custom end · {endBpm} BPM</span>
+        <input
+          type="range"
+          min={MIN_BPM}
+          max={MAX_BPM}
+          step="1"
+          bind:value={endBpm}
+          disabled={playing}
+          aria-valuemin={MIN_BPM}
+          aria-valuemax={MAX_BPM}
+          aria-valuenow={endBpm}
+          aria-label="Custom ending tempo in beats per minute"
+        />
+        <span class="slider-range">
+          <span>{MIN_BPM}</span>
+          <span>{MAX_BPM}</span>
+        </span>
+      </label>
+    {/if}
 
     <label class="duration">
       <span class="slider-label">Duration</span>
@@ -430,7 +493,7 @@
   {:else}
     <fieldset class="choices">
       <legend class="slider-label">Tempo</legend>
-      <div class="choice-list" role="radiogroup" aria-label="Tempo in beats per minute">
+      <div class="choice-list segmented" role="radiogroup" aria-label="Tempo in beats per minute">
         {#each BPM_PRESETS as option (option.id)}
           <label class="choice">
             <input
@@ -657,6 +720,10 @@
     border-radius: 10px;
     overflow: hidden;
     background: var(--bg);
+  }
+
+  .choice-list.segmented.swing-presets {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
   }
 
   .choice {

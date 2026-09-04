@@ -7,6 +7,16 @@ import {
   swungStepBeats,
   type MeasureStructureId,
 } from './measures'
+import {
+  celloMelodyHit,
+  isPrechorusAcceleration,
+  midiToHz,
+  sectionAtPhrase,
+  trumpetMelodyHit,
+  usesArrangement,
+  type SongSection,
+  type SongStructureId,
+} from './songStructure'
 
 export type { BeatKind, MeasureStructureId }
 
@@ -56,6 +66,8 @@ export type StartOptions = {
 
 export type PhraseLength = 0 | 8 | 12
 
+export type { SongStructureId, SongSection } from './songStructure'
+
 const ARPEGGIO_HZ = [523.25, 659.25, 783.99, 1046.5] as const
 
 const RANDOM_SKIP_MIN_PLAY = 4
@@ -94,6 +106,7 @@ export class Metronome {
   private phraseLength: PhraseLength = 0
   private phraseBeats = 0
   private nextPhraseTime = 0
+  private songStructure: SongStructureId | null = null
   private crashBuffer: AudioBuffer | null = null
 
   get currentTime(): number {
@@ -133,6 +146,27 @@ export class Metronome {
     return (Math.floor(currentBeat / 4) % this.phraseLength) + 1
   }
 
+  get currentSongSection(): SongSection | null {
+    if (!this.songStructure || this.phraseLength <= 0) {
+      return null
+    }
+
+    if (!usesArrangement(this.songStructure)) {
+      return null
+    }
+
+    if (!this.isRunning) {
+      return sectionAtPhrase(this.songStructure, 0)
+    }
+
+    const bpm = Math.max(1, this.bpmAt(this.currentTime))
+    const beatsAhead = Math.max(0, (this.nextPhraseTime - this.currentTime) * bpm / 60)
+    const currentBeat = Math.max(0, this.phraseBeats - beatsAhead)
+    const beatsPerPhrase = this.phraseLength * 4
+    const phraseIndex = Math.floor(currentBeat / beatsPerPhrase)
+    return sectionAtPhrase(this.songStructure, phraseIndex)
+  }
+
   setStructure(structure: MeasureStructureId): void {
     if (this.structure === structure) {
       return
@@ -152,6 +186,10 @@ export class Metronome {
 
   setPhraseLength(length: PhraseLength): void {
     this.phraseLength = length
+  }
+
+  setSongStructure(structure: SongStructureId | null): void {
+    this.songStructure = structure
   }
 
   /** Align the wheel to a note at the moment it is heard. */
@@ -310,9 +348,31 @@ export class Metronome {
     }
 
     while (this.nextPhraseTime < ctx.currentTime + SCHEDULE_AHEAD_S) {
-      this.schedulePhraseAccent(this.nextPhraseTime, this.phraseBeats)
+      if (this.songStructure && this.phraseLength > 0 && usesArrangement(this.songStructure)) {
+        this.scheduleSongStructure(this.nextPhraseTime, this.phraseBeats)
+      } else if (this.phraseLength > 0) {
+        this.schedulePhraseAccent(this.nextPhraseTime, this.phraseBeats)
+      }
+
       const bpm = Math.max(1, this.bpmAt(this.nextPhraseTime))
-      this.nextPhraseTime += 60 / bpm
+      const beatDuration = 60 / bpm
+
+      if (
+        this.songStructure &&
+        this.phraseLength > 0 &&
+        usesArrangement(this.songStructure)
+      ) {
+        const beatsPerPhrase = this.phraseLength * 4
+        const beatInPhrase = this.phraseBeats % beatsPerPhrase
+        const phraseIndex = Math.floor(this.phraseBeats / beatsPerPhrase)
+        const barInPhrase = Math.floor(beatInPhrase / 4)
+        const section = sectionAtPhrase(this.songStructure, phraseIndex)
+        if (isPrechorusAcceleration(this.phraseLength, barInPhrase, section)) {
+          this.scheduleQuietCymbal(this.nextPhraseTime + beatDuration / 2)
+        }
+      }
+
+      this.nextPhraseTime += beatDuration
       this.phraseBeats += 1
     }
 
@@ -483,6 +543,201 @@ export class Metronome {
     pingGain.connect(ctx.destination)
     ping.start(time)
     ping.stop(time + 0.025)
+  }
+
+  private scheduleSongStructure(time: number, phraseBeat: number): void {
+    if (!this.songStructure || this.phraseLength <= 0) {
+      return
+    }
+
+    const beatsPerPhrase = this.phraseLength * 4
+    const beatInPhrase = ((phraseBeat % beatsPerPhrase) + beatsPerPhrase) % beatsPerPhrase
+    const phraseIndex = Math.floor(phraseBeat / beatsPerPhrase)
+    const barInPhrase = Math.floor(beatInPhrase / 4)
+    const beatInBar = beatInPhrase % 4
+    const section = sectionAtPhrase(this.songStructure, phraseIndex)
+    const bpm = Math.max(1, this.bpmAt(time))
+
+    const hit = celloMelodyHit(this.phraseLength, barInPhrase, beatInBar, beatInPhrase, section)
+    if (hit) {
+      this.scheduleLegatoCello(time, midiToHz(hit.midi), hit.duration, bpm, hit.fadeOut)
+    }
+
+    if (section === 'chorus') {
+      const trumpetHit = trumpetMelodyHit(this.phraseLength, barInPhrase, beatInBar)
+      if (trumpetHit) {
+        this.scheduleTrumpet(
+          time,
+          midiToHz(trumpetHit.midi),
+          trumpetHit.duration,
+          bpm,
+          trumpetHit.fadeOut,
+        )
+      }
+    }
+
+    if (section === 'prechorus') {
+      this.scheduleQuietCymbal(time)
+    }
+  }
+
+  private scheduleLegatoCello(
+    time: number,
+    hz: number,
+    durationBeats: number,
+    bpm: number,
+    fadeOut = false,
+  ): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const duration = (60 / bpm) * durationBeats
+    const oscillator = ctx.createOscillator()
+    const filter = ctx.createBiquadFilter()
+    const gain = ctx.createGain()
+
+    oscillator.type = 'sawtooth'
+    oscillator.frequency.setValueAtTime(hz, time)
+
+    filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(820, time)
+    filter.Q.setValueAtTime(0.7, time)
+
+    gain.gain.setValueAtTime(0.001, time)
+    gain.gain.linearRampToValueAtTime(0.11, time + 0.07)
+    if (fadeOut) {
+      gain.gain.setValueAtTime(0.11, time + 0.1)
+      gain.gain.exponentialRampToValueAtTime(0.001, time + duration)
+    } else {
+      gain.gain.setValueAtTime(0.11, time + duration - 0.08)
+      gain.gain.linearRampToValueAtTime(0.001, time + duration)
+    }
+
+    oscillator.connect(filter)
+    filter.connect(gain)
+    gain.connect(ctx.destination)
+    oscillator.start(time)
+    oscillator.stop(time + duration + 0.05)
+  }
+
+  private scheduleTrumpet(
+    time: number,
+    hz: number,
+    durationBeats: number,
+    bpm: number,
+    fadeOut = false,
+  ): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const baseDuration = (60 / bpm) * durationBeats
+    const duration = fadeOut ? baseDuration * 1.5 : baseDuration
+    const attack = Math.min(0.016, baseDuration * 0.12)
+    const mix = ctx.createGain()
+    mix.gain.setValueAtTime(1, time)
+
+    const harmonics = [
+      { mult: 1, level: 1, type: 'sawtooth' as OscillatorType },
+      { mult: 2, level: 0.62, type: 'sawtooth' as OscillatorType },
+      { mult: 3, level: 0.38, type: 'square' as OscillatorType },
+      { mult: 4, level: 0.22, type: 'sine' as OscillatorType },
+      { mult: 5, level: 0.14, type: 'sine' as OscillatorType },
+    ]
+
+    for (const harmonic of harmonics) {
+      const oscillator = ctx.createOscillator()
+      const harmonicGain = ctx.createGain()
+      oscillator.type = harmonic.type
+      oscillator.frequency.setValueAtTime(hz * harmonic.mult, time)
+      harmonicGain.gain.setValueAtTime(harmonic.level, time)
+      oscillator.connect(harmonicGain)
+      harmonicGain.connect(mix)
+      oscillator.start(time)
+      oscillator.stop(time + duration + 0.08)
+    }
+
+    const noise = this.getNoiseBuffer(ctx)
+    const noiseSource = ctx.createBufferSource()
+    noiseSource.buffer = noise
+
+    const noiseFilter = ctx.createBiquadFilter()
+    noiseFilter.type = 'bandpass'
+    noiseFilter.frequency.setValueAtTime(2200, time)
+    noiseFilter.Q.setValueAtTime(2.4, time)
+
+    const noiseGain = ctx.createGain()
+    noiseGain.gain.setValueAtTime(fadeOut ? 0.035 : 0.07, time)
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, time + 0.035)
+
+    noiseSource.connect(noiseFilter)
+    noiseFilter.connect(noiseGain)
+    noiseGain.connect(mix)
+    noiseSource.start(time)
+    noiseSource.stop(time + 0.04)
+
+    const filter = ctx.createBiquadFilter()
+    filter.type = 'lowpass'
+    filter.Q.setValueAtTime(0.9, time)
+    filter.frequency.setValueAtTime(Math.min(5200, hz * 9), time)
+    filter.frequency.exponentialRampToValueAtTime(Math.min(2400, hz * 4.5), time + attack + 0.05)
+    if (fadeOut) {
+      filter.frequency.exponentialRampToValueAtTime(Math.min(900, hz * 2), time + duration * 0.7)
+    } else {
+      filter.frequency.setValueAtTime(Math.min(1800, hz * 3.5), time + baseDuration * 0.45)
+    }
+
+    const gain = ctx.createGain()
+    const peak = fadeOut ? 0.1 : 0.13
+    gain.gain.setValueAtTime(0.001, time)
+    gain.gain.linearRampToValueAtTime(peak, time + attack)
+    if (fadeOut) {
+      gain.gain.setValueAtTime(peak * 0.82, time + attack + 0.04)
+      gain.gain.exponentialRampToValueAtTime(0.001, time + duration)
+    } else {
+      gain.gain.setValueAtTime(peak * 0.7, time + baseDuration * 0.55)
+      gain.gain.exponentialRampToValueAtTime(0.001, time + baseDuration)
+    }
+
+    mix.connect(filter)
+    filter.connect(gain)
+    gain.connect(ctx.destination)
+  }
+
+  private scheduleQuietCymbal(time: number): void {
+    const ctx = this.ctx
+    if (!ctx) {
+      return
+    }
+
+    const bpm = Math.max(1, this.bpmAt(time))
+    const duration = (60 / bpm) * 0.55
+    const noise = this.getCrashBuffer(ctx)
+    const source = ctx.createBufferSource()
+    source.buffer = noise
+
+    const highpass = ctx.createBiquadFilter()
+    highpass.type = 'highpass'
+    highpass.frequency.setValueAtTime(1200, time)
+
+    const bandpass = ctx.createBiquadFilter()
+    bandpass.type = 'bandpass'
+    bandpass.frequency.setValueAtTime(4800, time)
+    bandpass.Q.setValueAtTime(0.55, time)
+
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.1, time)
+    gain.gain.exponentialRampToValueAtTime(0.001, time + duration)
+
+    source.connect(highpass)
+    highpass.connect(bandpass)
+    bandpass.connect(gain)
+    gain.connect(ctx.destination)
+    source.start(time)
+    source.stop(time + duration)
   }
 
   private schedulePhraseAccent(time: number, beatIndex: number): void {

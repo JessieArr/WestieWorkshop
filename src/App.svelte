@@ -8,6 +8,7 @@
     type BeatKind,
     type MeasureStructureId,
   } from './lib/measures'
+  import { SONG_STRUCTURES, sectionAtPhrase, sectionLabel, usesArrangement } from './lib/songStructure'
 
   const MIN_BPM = 40
   const MAX_BPM = 240
@@ -74,6 +75,7 @@
   type SwingPresetId = (typeof SWING_PRESETS)[number]['id']
   type BpmPresetId = (typeof BPM_PRESETS)[number]['id']
   type PhraseId = (typeof PHRASE_STRUCTURES)[number]['id']
+  type SongStructureOptionId = (typeof SONG_STRUCTURES)[number]['id']
 
   const metronome = new Metronome()
 
@@ -89,6 +91,7 @@
   let randomSkipMax = $state(8)
   let measureStructure = $state<MeasureStructureId>('quarters')
   let phraseId = $state<PhraseId>('none')
+  let songStructureId = $state<SongStructureOptionId>('count-transitions')
   let swingPreset = $state<SwingPresetId>('50')
   let swingPercent = $state(50)
   let bpmPreset = $state<BpmPresetId>('120')
@@ -100,6 +103,7 @@
   let pulseBeat = $state<number | null>(null)
   let liveBpm = $state(120)
   let liveBar = $state(1)
+  let liveSongSection = $state('Verse')
   let measureProgress = $state(0)
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
@@ -112,6 +116,13 @@
   const swingEnabled = $derived(structureHasAnd(measureStructure))
   const phraseActive = $derived(phraseId !== 'none')
   const displayedBar = $derived(playing ? liveBar : 1)
+  const displayedSongSection = $derived(
+    phraseActive && usesArrangement(songStructureId)
+      ? playing
+        ? liveSongSection
+        : sectionLabel(sectionAtPhrase(songStructureId, 0))
+      : null,
+  )
 
   $effect(() => {
     if (!drillHelpOpen) {
@@ -178,6 +189,10 @@
   })
 
   $effect(() => {
+    metronome.setSongStructure(phraseActive ? songStructureId : null)
+  })
+
+  $effect(() => {
     if (playing && tempoChange) {
       return
     }
@@ -193,6 +208,8 @@
     const update = () => {
       liveBpm = Math.round(metronome.currentBpm)
       liveBar = metronome.currentBar
+      const section = metronome.currentSongSection
+      liveSongSection = section ? sectionLabel(section) : 'Verse'
       measureProgress = metronome.measureProgress
       frame = requestAnimationFrame(update)
     }
@@ -372,6 +389,9 @@
         </div>
         {#if phraseActive}
           <span class="bar-readout">Bar: {displayedBar}</span>
+          {#if displayedSongSection}
+            <span class="section-readout">{displayedSongSection}</span>
+          {/if}
         {/if}
       </div>
     </div>
@@ -401,6 +421,19 @@
       <span class="slider-label">Phrase structure</span>
       <select bind:value={phraseId} aria-label="Phrase structure">
         {#each PHRASE_STRUCTURES as option (option.id)}
+          <option value={option.id}>{option.label}</option>
+        {/each}
+      </select>
+    </label>
+
+    <label class="field">
+      <span class="slider-label">Song structure</span>
+      <select
+        bind:value={songStructureId}
+        disabled={!phraseActive}
+        aria-label="Song structure"
+      >
+        {#each SONG_STRUCTURES as option (option.id)}
           <option value={option.id}>{option.label}</option>
         {/each}
       </select>
@@ -783,6 +816,14 @@
     color: var(--text);
   }
 
+  .section-readout {
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
   .slider,
   .duration,
   .field,
@@ -795,9 +836,15 @@
 
   .field-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
     width: 100%;
+  }
+
+  @media (max-width: 720px) {
+    .field-row {
+      grid-template-columns: 1fr;
+    }
   }
 
   .field-label-row {

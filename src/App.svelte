@@ -38,9 +38,30 @@
   ] as const
 
   const DRILLS = [
-    { id: 'metronome', label: 'Metronome' },
-    { id: 'tempo-change', label: 'Tempo Change' },
-    { id: 'skip-measures', label: 'Skip Measures' },
+    {
+      id: 'metronome',
+      label: 'Metronome',
+      description:
+        'Steady beats at a fixed tempo. Pick a preset or set a custom BPM to practice timing, footwork, or patterns.',
+    },
+    {
+      id: 'tempo-change',
+      label: 'Tempo Change',
+      description:
+        'Gradually ramps from a starting tempo to an ending tempo over a set duration. Builds speed and stamina while you stay in time.',
+    },
+    {
+      id: 'skip-measures',
+      label: 'Skip Measures',
+      description:
+        'Plays for a fixed interval, then goes silent for a fixed skip interval, repeating. Keeps you counting through gaps in the click.',
+    },
+    {
+      id: 'random-skip',
+      label: 'Random Skip',
+      description:
+        'Plays 4–16 beats at random, then skips a random number of beats within your range, repeating. Unpredictable silence trains internal timing.',
+    },
   ] as const
 
   const PHRASE_STRUCTURES = [
@@ -64,6 +85,8 @@
   let skipEvery = $state(2)
   let skipAmount = $state(2)
   let skipUnit = $state<SkipUnit>('measures')
+  let randomSkipMin = $state(2)
+  let randomSkipMax = $state(8)
   let measureStructure = $state<MeasureStructureId>('quarters')
   let phraseId = $state<PhraseId>('none')
   let swingPreset = $state<SwingPresetId>('50')
@@ -80,12 +103,35 @@
   let measureProgress = $state(0)
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
+  let drillHelpOpen = $state(false)
+
+  const activeDrill = $derived(DRILLS.find((entry) => entry.id === drill) ?? DRILLS[0])
 
   const tempoChange = $derived(drill === 'tempo-change')
   const displayedBpm = $derived(playing ? liveBpm : tempoChange ? startBpm : bpm)
   const swingEnabled = $derived(structureHasAnd(measureStructure))
   const phraseActive = $derived(phraseId !== 'none')
   const displayedBar = $derived(playing ? liveBar : 1)
+
+  $effect(() => {
+    if (!drillHelpOpen) {
+      return
+    }
+
+    const close = () => {
+      drillHelpOpen = false
+    }
+    const id = window.setTimeout(() => {
+      window.addEventListener('click', close)
+      window.addEventListener('touchstart', close)
+    }, 0)
+
+    return () => {
+      window.clearTimeout(id)
+      window.removeEventListener('click', close)
+      window.removeEventListener('touchstart', close)
+    }
+  })
 
   metronome.onBeat = (time, kind, beat, audible) => {
     const generation = beatGeneration
@@ -171,6 +217,16 @@
       endBpmPreset = bpmPresetFor(endBpm)
     }
     drill = next
+    drillHelpOpen = false
+  }
+
+  function toggleDrillHelp(event: MouseEvent): void {
+    event.stopPropagation()
+    drillHelpOpen = !drillHelpOpen
+  }
+
+  function closeDrillHelp(): void {
+    drillHelpOpen = false
   }
 
   async function togglePlayback(): Promise<void> {
@@ -199,6 +255,19 @@
           every: skipEvery,
           skip: skipAmount,
           unit: skipUnit,
+        },
+      })
+    } else if (drill === 'random-skip') {
+      randomSkipMin = clamp(Number(randomSkipMin) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+      randomSkipMax = clamp(Number(randomSkipMax) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+      if (randomSkipMin > randomSkipMax) {
+        randomSkipMax = randomSkipMin
+      }
+      liveBpm = bpm
+      await metronome.start({
+        randomSkip: {
+          minSkip: randomSkipMin,
+          maxSkip: randomSkipMax,
         },
       })
     } else {
@@ -259,6 +328,14 @@
   function bpmPresetFor(value: number): BpmPresetId {
     const preset = BPM_PRESETS.find((option) => 'value' in option && option.value === value)
     return preset?.id ?? 'custom'
+  }
+
+  function clampRandomSkipRange(): void {
+    randomSkipMin = clamp(Number(randomSkipMin) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+    randomSkipMax = clamp(Number(randomSkipMax) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+    if (randomSkipMin > randomSkipMax) {
+      randomSkipMax = randomSkipMin
+    }
   }
 
   function clamp(value: number, min: number, max: number): number {
@@ -371,8 +448,27 @@
     {/if}
   {/if}
 
-  <label class="field">
-    <span class="slider-label">Drill</span>
+  <div class="field drill-field">
+    <div class="field-label-row">
+      <span class="slider-label">Drill</span>
+      <div class="help-anchor">
+        <button
+          type="button"
+          class="help-trigger"
+          aria-label="About {activeDrill.label}"
+          aria-expanded={drillHelpOpen}
+          aria-controls="drill-help-text"
+          onclick={toggleDrillHelp}
+        >
+          ?
+        </button>
+        {#if drillHelpOpen}
+          <div id="drill-help-text" class="help-bubble" role="tooltip">
+            <p>{activeDrill.description}</p>
+          </div>
+        {/if}
+      </div>
+    </div>
     <select
       value={drill}
       disabled={playing}
@@ -383,7 +479,7 @@
         <option value={option.id}>{option.label}</option>
       {/each}
     </select>
-  </label>
+  </div>
 
   {#if tempoChange}
     <fieldset class="choices">
@@ -569,6 +665,34 @@
       />
     </div>
   {/if}
+
+  {#if drill === 'random-skip'}
+    <div class="skip-row">
+      <span>Skip</span>
+      <input
+        type="number"
+        min={MIN_SKIP}
+        max={MAX_SKIP}
+        step="1"
+        bind:value={randomSkipMin}
+        disabled={playing}
+        onblur={clampRandomSkipRange}
+        aria-label="Minimum beats to skip"
+      />
+      <span>to</span>
+      <input
+        type="number"
+        min={MIN_SKIP}
+        max={MAX_SKIP}
+        step="1"
+        bind:value={randomSkipMax}
+        disabled={playing}
+        onblur={clampRandomSkipRange}
+        aria-label="Maximum beats to skip"
+      />
+      <span>beats</span>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -674,6 +798,75 @@
     grid-template-columns: 1fr 1fr;
     gap: 12px;
     width: 100%;
+  }
+
+  .field-label-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .help-anchor {
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .help-trigger {
+    display: grid;
+    place-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .help-trigger:hover {
+    border-color: var(--accent-border);
+    color: var(--accent);
+  }
+
+  .help-trigger:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .help-trigger[aria-expanded='true'] {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+    color: var(--accent);
+  }
+
+  .help-bubble {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 22;
+    width: min(18rem, calc(100vw - 48px));
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    box-shadow: 0 8px 24px rgba(8, 6, 13, 0.12);
+    text-align: left;
+  }
+
+  .help-bubble p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--text-h);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
   }
 
   .choices {

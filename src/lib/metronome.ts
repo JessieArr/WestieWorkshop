@@ -43,14 +43,27 @@ export type SkipConfig = {
   unit: SkipUnit
 }
 
+export type RandomSkipConfig = {
+  minSkip: number
+  maxSkip: number
+}
+
 export type StartOptions = {
   ramp?: TempoRamp
   skip?: SkipConfig
+  randomSkip?: RandomSkipConfig
 }
 
 export type PhraseLength = 0 | 8 | 12
 
 const ARPEGGIO_HZ = [523.25, 659.25, 783.99, 1046.5] as const
+
+const RANDOM_SKIP_MIN_PLAY = 4
+const RANDOM_SKIP_MAX_PLAY = 16
+
+function randomInt(min: number, max: number): number {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
 
 type ActiveRamp = TempoRamp & {
   startTime: number
@@ -74,6 +87,9 @@ export class Metronome {
   private timerId: ReturnType<typeof setTimeout> | null = null
   private ramp: ActiveRamp | null = null
   private skip: SkipConfig | null = null
+  private randomSkip: RandomSkipConfig | null = null
+  private randomSkipSilent = false
+  private randomSkipBeatsLeft = 0
   private elapsedBeats = 0
   private phraseLength: PhraseLength = 0
   private phraseBeats = 0
@@ -210,6 +226,14 @@ export class Metronome {
       this.ramp = null
     }
     this.skip = options?.skip ?? null
+    this.randomSkip = options?.randomSkip ?? null
+    if (this.randomSkip) {
+      this.randomSkipSilent = false
+      this.randomSkipBeatsLeft = randomInt(RANDOM_SKIP_MIN_PLAY, RANDOM_SKIP_MAX_PLAY)
+    } else {
+      this.randomSkipSilent = false
+      this.randomSkipBeatsLeft = 0
+    }
     const startBeat = MEASURE_START_BEAT[this.structure]
     this.beatsInMeasure = startBeat
     this.elapsedBeats = startBeat
@@ -235,6 +259,9 @@ export class Metronome {
     this.heardTime = 0
     this.ramp = null
     this.skip = null
+    this.randomSkip = null
+    this.randomSkipSilent = false
+    this.randomSkipBeatsLeft = 0
   }
 
   async destroy(): Promise<void> {
@@ -279,6 +306,7 @@ export class Metronome {
       if (this.beatsInMeasure >= 4 - 1e-6) {
         this.beatsInMeasure -= 4
       }
+      this.advanceRandomSkip(stepBeats)
     }
 
     while (this.nextPhraseTime < ctx.currentTime + SCHEDULE_AHEAD_S) {
@@ -292,6 +320,10 @@ export class Metronome {
   }
 
   private isSilentAt(elapsedBeats: number): boolean {
+    if (this.randomSkip) {
+      return this.randomSkipSilent
+    }
+
     if (!this.skip) {
       return false
     }
@@ -302,6 +334,28 @@ export class Metronome {
     const cycle = playFor + skipFor
     const pos = ((elapsedBeats % cycle) + cycle) % cycle
     return pos >= playFor - 1e-6
+  }
+
+  private advanceRandomSkip(stepBeats: number): void {
+    if (!this.randomSkip) {
+      return
+    }
+
+    this.randomSkipBeatsLeft -= stepBeats
+    if (this.randomSkipBeatsLeft > 1e-6) {
+      return
+    }
+
+    if (this.randomSkipSilent) {
+      this.randomSkipSilent = false
+      this.randomSkipBeatsLeft = randomInt(RANDOM_SKIP_MIN_PLAY, RANDOM_SKIP_MAX_PLAY)
+      return
+    }
+
+    const minSkip = Math.max(1, this.randomSkip.minSkip)
+    const maxSkip = Math.max(minSkip, this.randomSkip.maxSkip)
+    this.randomSkipSilent = true
+    this.randomSkipBeatsLeft = randomInt(minSkip, maxSkip)
   }
 
   private scheduleBoom(time: number): void {

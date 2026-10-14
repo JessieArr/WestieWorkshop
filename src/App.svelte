@@ -1,6 +1,16 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte'
+  import { onDestroy, onMount } from 'svelte'
   import { Metronome, type PhraseLength, type SkipUnit } from './lib/metronome'
+  import {
+    activateAudioSession,
+    clearPlaybackSession,
+    markPlaybackPaused,
+    markPlaybackPlaying,
+    setPlaybackHandlers,
+    updateNowPlaying,
+    watchPlaybackInterrupt,
+  } from './lib/playbackSession'
+  import { renderWheelArtwork } from './lib/wheelArtwork'
   import MeasureWheel from './lib/MeasureWheel.svelte'
   import {
     MEASURE_STRUCTURES,
@@ -108,6 +118,11 @@
   let beatGeneration = 0
   let pulseTimer: ReturnType<typeof setTimeout> | null = null
   let drillHelpOpen = $state(false)
+  let starting = false
+  let stopping = false
+  let lastArtworkAt = 0
+  let artworkInFlight = false
+  let artworkPending = false
 
   const activeDrill = $derived(DRILLS.find((entry) => entry.id === drill) ?? DRILLS[0])
 
@@ -151,9 +166,15 @@
       if (generation !== beatGeneration) {
         return
       }
+      if (time < metronome.currentTime - 0.08) {
+        return
+      }
+      metronome.hearBeat(beat)
+      if (document.hidden) {
+        return
+      }
       beatKind = kind
       pulseBeat = beat
-      metronome.hearBeat(beat)
       measureProgress = beat / 4
       if (!audible) {
         pulsing = false
@@ -214,7 +235,13 @@
       frame = requestAnimationFrame(update)
     }
     frame = requestAnimationFrame(update)
-    return () => cancelAnimationFrame(frame)
+    const artworkTimer = setInterval(() => {
+      void publishArtwork()
+    }, 500)
+    return () => {
+      cancelAnimationFrame(frame)
+      clearInterval(artworkTimer)
+    }
   })
 
   function setDrill(next: DrillId): void {
@@ -251,64 +278,169 @@
       stopPlayback()
       return
     }
+    await startPlayback()
+  }
 
-    if (tempoChange) {
-      const duration = clamp(Number(rampSeconds) || MIN_RAMP_SECONDS, MIN_RAMP_SECONDS, MAX_RAMP_SECONDS)
-      rampSeconds = duration
-      liveBpm = startBpm
-      await metronome.start({
-        ramp: {
-          from: clamp(Number(startBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
-          to: clamp(Number(endBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
-          duration,
-        },
-      })
-    } else if (drill === 'skip-measures') {
-      skipEvery = clamp(Number(skipEvery) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
-      skipAmount = clamp(Number(skipAmount) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
-      liveBpm = bpm
-      await metronome.start({
-        skip: {
-          every: skipEvery,
-          skip: skipAmount,
-          unit: skipUnit,
-        },
-      })
-    } else if (drill === 'random-skip') {
-      randomSkipMin = clamp(Number(randomSkipMin) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
-      randomSkipMax = clamp(Number(randomSkipMax) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
-      if (randomSkipMin > randomSkipMax) {
-        randomSkipMax = randomSkipMin
+  async function startPlayback(): Promise<void> {
+    if (playing || starting || metronome.isRunning) return
+    starting = true
+    try {
+      activateAudioSession()
+      const outputReady = metronome.engageOutput()
+      if (tempoChange) {
+        const duration = clamp(Number(rampSeconds) || MIN_RAMP_SECONDS, MIN_RAMP_SECONDS, MAX_RAMP_SECONDS)
+        rampSeconds = duration
+        liveBpm = startBpm
+        await outputReady
+        await metronome.start({
+          ramp: {
+            from: clamp(Number(startBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
+            to: clamp(Number(endBpm) || MIN_BPM, MIN_BPM, MAX_BPM),
+            duration,
+          },
+        })
+      } else if (drill === 'skip-measures') {
+        skipEvery = clamp(Number(skipEvery) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        skipAmount = clamp(Number(skipAmount) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        liveBpm = bpm
+        await outputReady
+        await metronome.start({
+          skip: {
+            every: skipEvery,
+            skip: skipAmount,
+            unit: skipUnit,
+          },
+        })
+      } else if (drill === 'random-skip') {
+        randomSkipMin = clamp(Number(randomSkipMin) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        randomSkipMax = clamp(Number(randomSkipMax) || MIN_SKIP, MIN_SKIP, MAX_SKIP)
+        if (randomSkipMin > randomSkipMax) {
+          randomSkipMax = randomSkipMin
+        }
+        liveBpm = bpm
+        await outputReady
+        await metronome.start({
+          randomSkip: {
+            minSkip: randomSkipMin,
+            maxSkip: randomSkipMax,
+          },
+        })
+      } else {
+        liveBpm = bpm
+        await outputReady
+        await metronome.start()
       }
-      liveBpm = bpm
-      await metronome.start({
-        randomSkip: {
-          minSkip: randomSkipMin,
-          maxSkip: randomSkipMax,
-        },
-      })
-    } else {
-      liveBpm = bpm
-      await metronome.start()
-    }
 
-    playing = true
+      playing = true
+      markPlaybackPlaying()
+      void publishArtwork(true)
+    } catch {
+      if (playing || metronome.isRunning) stopPlayback()
+      else {
+        metronome.stop()
+        markPlaybackPaused()
+      }
+    } finally {
+      starting = false
+    }
   }
 
   function stopPlayback(): void {
-    metronome.stop()
-    playing = false
-    pulsing = false
-    beatKind = 'boom'
-    pulseBeat = null
-    measureProgress = 0
-    liveBar = 1
-    beatGeneration += 1
-    if (pulseTimer !== null) {
-      clearTimeout(pulseTimer)
-      pulseTimer = null
+    if (stopping || (!playing && !metronome.isRunning)) return
+    stopping = true
+    try {
+      metronome.stop()
+      playing = false
+      pulsing = false
+      beatKind = 'boom'
+      pulseBeat = null
+      measureProgress = 0
+      liveBar = 1
+      beatGeneration += 1
+      if (pulseTimer !== null) {
+        clearTimeout(pulseTimer)
+        pulseTimer = null
+      }
+      markPlaybackPaused()
+    } finally {
+      stopping = false
     }
   }
+
+  async function publishArtwork(force = false): Promise<void> {
+    if (!playing) return
+    const now = performance.now()
+    if (!force && now - lastArtworkAt < 400) return
+    if (artworkInFlight) {
+      artworkPending = true
+      return
+    }
+
+    artworkInFlight = true
+    lastArtworkAt = now
+    const bpmNow = Math.round(metronome.currentBpm)
+    const bar = phraseActive ? metronome.currentBar : null
+    const section = metronome.currentSongSection
+    const sectionName = section ? sectionLabel(section) : null
+    const album = DRILLS.find((entry) => entry.id === drill)?.label ?? 'Metronome'
+    try {
+      const blob = await renderWheelArtwork({
+        structure: measureStructure,
+        swing: Number(swingPercent) / 100,
+        progress: metronome.measureProgress,
+        bpm: bpmNow,
+        bar,
+        section: sectionName,
+        playing: true,
+      })
+      const title = bar === null ? `${bpmNow} BPM` : `${bpmNow} BPM · Bar ${bar}`
+      await updateNowPlaying(blob, {
+        title,
+        artist: 'Westie Workshop',
+        album: sectionName ? `${album} · ${sectionName}` : album,
+      })
+    } catch {
+      // Clicks keep going when the lock-screen image cannot be built.
+    } finally {
+      artworkInFlight = false
+      if (artworkPending && playing) {
+        artworkPending = false
+        void publishArtwork(true)
+      } else {
+        artworkPending = false
+      }
+    }
+  }
+
+  onMount(() => {
+    setPlaybackHandlers(
+      () => {
+        void startPlayback()
+      },
+      () => {
+        if (metronome.isRunning) stopPlayback()
+      },
+    )
+
+    const onVisibility = () => {
+      if (!metronome.isRunning) return
+      if (document.hidden) {
+        metronome.holdForBackground()
+        void publishArtwork(true)
+      } else {
+        metronome.resumeForeground()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    const stopInterruptWatch = watchPlaybackInterrupt(() => {
+      if (metronome.isRunning) stopPlayback()
+    })
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      stopInterruptWatch()
+    }
+  })
 
   function setSwingPreset(id: SwingPresetId): void {
     swingPreset = id
@@ -364,6 +496,7 @@
     if (pulseTimer !== null) {
       clearTimeout(pulseTimer)
     }
+    clearPlaybackSession()
     void metronome.destroy()
   })
 </script>

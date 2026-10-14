@@ -431,13 +431,27 @@
         metronome.resumeForeground()
       }
     }
+    const onFreeze = () => {
+      if (metronome.isRunning) metronome.holdForBackground()
+    }
+    const onPageResume = () => {
+      if (!metronome.isRunning) return
+      metronome.resumeForeground()
+    }
     document.addEventListener('visibilitychange', onVisibility)
+    document.addEventListener('freeze', onFreeze)
+    document.addEventListener('resume', onPageResume)
     const stopInterruptWatch = watchPlaybackInterrupt(() => {
-      if (metronome.isRunning) stopPlayback()
+      // A locked screen can interrupt audio without the listener pausing.
+      // Stopping here would make the metronome stay off after unlock.
+      if (document.hidden || !metronome.isRunning) return
+      stopPlayback()
     })
 
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
+      document.removeEventListener('freeze', onFreeze)
+      document.removeEventListener('resume', onPageResume)
       stopInterruptWatch()
     }
   })

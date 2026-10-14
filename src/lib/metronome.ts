@@ -113,6 +113,7 @@ export class Metronome {
   private streamDest: MediaStreamAudioDestinationNode | null = null
   private outputEl: HTMLAudioElement | null = null
   private speakersConnected = false
+  private contextWatcher: (() => void) | null = null
   private noiseBuffer: AudioBuffer | null = null
   private scheduleAheadS = SCHEDULE_AHEAD_S
   private noteMarks: NoteMark[] = []
@@ -230,8 +231,19 @@ export class Metronome {
    */
   engageOutput(): Promise<void> {
     const ctx = this.ensureContext()
-    this.armBackgroundOutput()
+    this.watchContext()
     const resumePromise = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve()
+    // Firefox only keeps audio going with the screen off when the context itself
+    // is playing through the speakers. A media-element stream does not count, and
+    // unplugging the speakers makes Firefox suspend the page on lock.
+    if (this.firefoxSpeakers()) {
+      this.useSpeakers()
+      return resumePromise.then(
+        () => undefined,
+        () => undefined,
+      )
+    }
+    this.armBackgroundOutput()
     const playPromise = this.outputEl?.play() ?? Promise.reject(new Error('missing output'))
     return playPromise.then(
       () => {
@@ -402,11 +414,19 @@ export class Metronome {
     this.master = null
     this.speakersConnected = false
     if (this.ctx) {
+      if (this.contextWatcher) {
+        this.ctx.removeEventListener('statechange', this.contextWatcher)
+        this.contextWatcher = null
+      }
       await this.ctx.close()
       this.ctx = null
     }
     this.noiseBuffer = null
     this.crashBuffer = null
+  }
+
+  private firefoxSpeakers(): boolean {
+    return /Firefox\//.test(navigator.userAgent)
   }
 
   private ensureContext(): AudioContext {
@@ -415,6 +435,17 @@ export class Metronome {
       this.master = this.ctx.createGain()
     }
     return this.ctx
+  }
+
+  private watchContext(): void {
+    const ctx = this.ctx
+    if (!ctx || this.contextWatcher) return
+    this.contextWatcher = () => {
+      if (ctx.state === 'suspended' && this.isRunning) {
+        void ctx.resume()
+      }
+    }
+    ctx.addEventListener('statechange', this.contextWatcher)
   }
 
   private armBackgroundOutput(): void {
